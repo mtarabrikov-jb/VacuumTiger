@@ -305,14 +305,21 @@ impl Status10ms {
     }
 }
 
-/// `0x03` @100ms — tilt, wheel currents, consumable flags. `<h h h h B ...>`.
+/// `0x03` @100ms — tilt, wheel currents, flags. **W10: 11 bytes.** Wheel currents
+/// **[verified]** by rotating in place: `left_current@4` and `right_current@6`
+/// both sit near 0 at rest and jump to ~300-430 while the wheels spin. `pitch@0`/
+/// `roll@2` are small signed values (deci-degrees assumed; ~-80/+14 = a slight
+/// dock-ramp tilt) that shift a little under motion — offsets confirmed, units not.
+/// `[8]` is a small signed value, **not** the Z10 consumable-flag bitfield (the
+/// `flags` accessors below are inherited from the Z10 and unverified on the W10 —
+/// removing the dustbin/tank to confirm was not done); `[10]` is a constant 0x12.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Status100ms {
-    pub pitch_ddeg: i16, // deci-degrees
+    pub pitch_ddeg: i16, // deci-degrees (offset verified; unit assumed)
     pub roll_ddeg: i16,
-    pub left_current: i16,
-    pub right_current: i16,
-    pub flags: u8,
+    pub left_current: i16,  // [verified] ~0 at rest, ~300-430 spinning
+    pub right_current: i16, // [verified] ~0 at rest, ~300-430 spinning
+    pub flags: u8,          // [8]: small signed, NOT a confirmed W10 bitfield
 }
 
 impl Status100ms {
@@ -604,8 +611,13 @@ pub fn encode_motor_ctrl(flag: u8, linear: f32, rotational: f32, out: &mut [u8])
     encode_frame(TX_MOTOR_CTRL, &p, out)
 }
 
-/// `0x01` SetCleaning: five actuator levels (fan/brushes/pump — exact mapping TBD).
-pub fn encode_set_cleaning(f: [u8; 5], out: &mut [u8]) -> Option<usize> {
+/// `0x01` SetCleaning: **6** actuator-level bytes (verified live on the W10 by
+/// watching `ava`'s TX). `[0]`/`[1]` carry levels (idle `00 01`; the mop-dock
+/// self-clean cycle raised them to `23 3c` = 35/60); `[2..6]` stayed 0 for the
+/// fan/brush at the dock. Exact byte->actuator mapping is not pinned down (fan/
+/// water presets set while idle do not change this frame — levels are pushed only
+/// when an actuator actually runs).
+pub fn encode_set_cleaning(f: [u8; 6], out: &mut [u8]) -> Option<usize> {
     encode_frame(TX_SET_CLEANING, &f, out)
 }
 
