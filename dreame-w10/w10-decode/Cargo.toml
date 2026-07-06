@@ -1,0 +1,13 @@
+[package]
+name = "w10-decode"
+version = "0.1.0"
+edition = "2021"
+description = "Host CLI: connect to avatap-relay and decode/hexdump the MCU + LDS streams"
+license = "MIT"
+
+[[bin]]
+name = "w10-decode"
+path = "src/main.rs"
+
+[dependencies]
+dreame-w10-proto = { path = "../proto" }

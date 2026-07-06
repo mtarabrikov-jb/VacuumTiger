@@ -1,0 +1,14 @@
+[package]
+name = "avatap-relay"
+version = "0.1.0"
+edition = "2021"
+description = "Drains the avatap shm rings and serves each channel over TCP"
+license = "MIT"
+
+[[bin]]
+name = "avatap-relay"
+path = "src/main.rs"
+
+[dependencies]
+libc = "0.2"
+avatap-shm = { path = "../shm" }

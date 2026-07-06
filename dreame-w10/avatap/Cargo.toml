@@ -1,0 +1,16 @@
+[package]
+name = "avatap"
+version = "0.1.0"
+edition = "2021"
+description = "LD_PRELOAD serial tap injected into ava: mirrors /dev/ttyS4 + /dev/ttyS3 to shm"
+license = "MIT"
+
+[lib]
+name = "avatap"
+crate-type = ["cdylib"]
+
+[dependencies]
+# no_std: keep the glibc symbol surface tiny so the .so loads on the robot's
+# glibc 2.23 (the same reason the C camera tap was built against old glibc).
+libc = { version = "0.2", default-features = false }
+avatap-shm = { path = "../shm" }

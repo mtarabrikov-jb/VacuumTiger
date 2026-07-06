@@ -1,0 +1,179 @@
+# Dreame W10 (`r2104`) MCU protocol — reverse-engineering findings
+
+The MCU is the microcontroller that drives the wheels/brushes/fan, reads the
+IMU, dock IR, bumpers and battery, and talks to the SoC (`ava`) over a framed
+binary link on **`/dev/ttyS4 @ 115200`**. This document records what has been
+decoded on the W10, how it was verified, and what is still open.
+
+Base reference: [`alufers/dreame_mcu_protocol`](https://github.com/alufers/dreame_mcu_protocol)
+(reverse-engineered on the Z10 Pro). The W10 shares the framing and most message
+types but several payload layouts differ — those differences are the point of
+this file. The parser that implements everything below is
+[`proto/src/lib.rs`](../proto/src/lib.rs).
+
+Legend: **[verified]** confirmed live on this robot · **[partial]** decodes but
+some fields/scales are wrong · **[unknown]** seen on the wire, not decoded.
+
+## Hardware map (verified live)
+
+- **MCU**: `/dev/ttyS4 @ 115200` — held by `ava` (fd 25). Framed binary protocol below.
+- **LDS/LIDAR**: `/dev/ttyS3 @ 230400` — held by `ava` (fd 30), config node `AvaNodeLDS`
+  in `/ava/conf/r2104.conf`. **Scan format decoded** — see [`LDS_PROTOCOL.md`](LDS_PROTOCOL.md).
+  **The turret only spins during active navigation** — `lds-rx` is silent while the
+  robot is idle/docked; enabling Valetudo manual control is enough to start it.
+- **Actuators**: fan/brush/pump via MCU `SetCleaning` (0x01) and/or SoC `pwmchip0`
+  (16 channels); exact mapping TBD.
+- `ava` opens both ports from process start; a second opener steals bytes, hence
+  the read-only tap (`avatap.so`) rather than a direct open.
+
+## Framing [verified]
+
+A packet is delimited by `<` (0x3c) .. `>` (0x3e). Inside, `?` (0x3f) escapes the
+next byte verbatim (a literal `<`, `>`, `?` in the body is preceded by `?`). The
+unescaped body is:
+
+```
+[len:u8] [type:u8] [payload: len bytes] [crc16: 2 bytes, big-endian hi,lo]
+```
+
+`crc16` is **CRC-16/Modbus** (poly 0xA001, init 0xFFFF) over `[len][type][payload]`.
+Verified: **0 CRC errors over many thousands of frames** through the live tap.
+
+## Messages from the MCU
+
+Observed types and rates (measured via the tap; ratios cross-checked, e.g.
+`n(0x02)/n(0x01) ≈ 2.0`, `n(0x01)/n(0x03) ≈ 5.0`):
+
+| type | name | period | status |
+|------|------|--------|--------|
+| 0x00 | Triggers | ~100 ms | [verified] |
+| 0x01 | Status20ms (pose/velocity) | 20 ms | [verified] |
+| 0x02 | Status10ms (IMU/odometry) | 10 ms | [verified] |
+| 0x03 | Status100ms (tilt/currents) | 100 ms | [partial] |
+| 0x05 | Status500ms (RTC) | 500 ms | [unknown] on W10 |
+| 0x0f | Ping (SoC must pong 0x0f) | ~500 ms | documented, not verified |
+| 0x23 | ? (base/station related on Z10) | ~100 ms | [unknown] W10 |
+| 0x24 | ? (battery-temp bit on Z10) | ~500 ms | [unknown] W10 |
+| 0x2b | BatteryStatus | ~1 s | [verified] |
+| 0x2c | ? (not in Z10 dict) | ~0.5 s | [unknown] W10-only |
+
+### 0x01 Status20ms — **W10 layout, 30 bytes [verified]**
+
+The W10 payload is the Z10 layout (26 B) with **4 reserved bytes inserted at
+offset 16** (they read `0xA5A5A5A5` at rest), shifting the velocity/current
+fields by +4:
+
+| offset | field | type | notes / verification |
+|--------|-------|------|----------------------|
+| 0..3   | timestamp_us | u32 | monotonic counter |
+| 4..7   | x | i32 (/10 mm) | **constant during in-place rotation** ✓ |
+| 8..11  | y | i32 (/10 mm) | **constant during in-place rotation** ✓ |
+| 12..13 | yaw | i16 (/100 °) | **swept −100°→−156° while rotating CW; decreases = CW** ✓ |
+| 14..15 | yaw_integral | i16 | small at rest |
+| 16..19 | **reserved** | — | `0xA5A5A5A5` at rest (the +4 vs Z10) |
+| 20..21 | **leftVel** | i16 | **0 at rest; +35..+47 during CW rotation** ✓ |
+| 22..23 | **rightVel** | i16 | **0 at rest; −35..−45 during CW rotation** ✓ |
+| 24..25 | edgeDis | i16 | 0 at rest (assignment by Z10 analogy, unconfirmed) |
+| 26..27 | roller_current | i16 | rises with motor load (unconfirmed) |
+| 28..29 | sidebrush_current | i16 | rises with motor load (unconfirmed) |
+
+Verification: driving the robot in place via Valetudo (see Methodology) makes
+leftVel/rightVel take **opposite signs** (left forward + / right back − = CW),
+while x/y stay put and yaw sweeps monotonically — the unambiguous differential-
+drive signature. Before the fix the old Z10 offsets read the reserved bytes and
+reported `leftVel=rightVel=−23131` (=`0xA5A5`) at rest.
+
+### 0x02 Status10ms — IMU + wheel odometry [verified]
+
+Layout `<I h h h h h h b b>` (18 B): timestamp, gyro[3]@4/6/8, accel[3]@10/12/14,
+leftDis@16, rightDis@17 (both `i8`). Verified live:
+
+- **accel = raw LSB, ±2 g full scale → `/16384` LSB·g⁻¹** (NOT `/1000`). At rest
+  the raw vector is `[90, −318, 16242]`, |v| ≈ 16246 ≈ 1 g, i.e. `[0.01, −0.02,
+  0.99] g` — level robot, gravity on Z. Live decode now reads `accel_z ≈ 0.99 g`.
+- **gyro = centi-deg/s (`/100`)** — rest ≈ 0; the yaw-rate axis is **index 2
+  (offset 8)**: in-place rotation drove it to −2937 raw = −29 °/s while gyro_x/y
+  stayed small.
+- **leftDis@16 / rightDis@17 = signed per-packet wheel travel (mm/10 ms)** —
+  range 0..1 at ~40 mm/s; over a forward-then-CW-rotate run summed to
+  `+501 / −47` (forward adds to both; CW rotation adds to left, subtracts right).
+
+### 0x03 Status100ms — tilt / currents / consumables [partial]
+
+W10 payload is **11 bytes** (Z10 was 9). A resting frame:
+`a8 ff 23 00 02 00 04 00 ff ff 12`. The last byte (`0x12`) is a stable
+flag-byte candidate (consumables). The remaining i16 fields (Z10:
+pitch, roll, leftCurrent, rightCurrent) don't map cleanly at the Z10 offsets and
+need a **physical tilt** (pitch/roll) and a **drive** (wheel currents) to pin
+down — low priority, since pitch/roll are already available from the 0x02
+accelerometer gravity vector.
+
+### 0x00 Triggers — bit flags [verified]
+
+7-byte bitfield; each global bit `k` = `(raw[k/8] >> (k%8)) & 1`. Decodes
+correctly on the W10: docked → `dock_sta=true`, all bumpers/wheel-float false, no
+error bits, `ir_dock_lf=7`. Fields (bumpers, wheel floating, dock IR, LDS
+buttons, and every fault flag: side/roll/pump/fan overcurrent, wheel
+overcurrent, lidar/vel/imu/charge errors) per [`proto`](../proto/src/lib.rs).
+
+### 0x2b BatteryStatus [verified]
+
+Layout `<H H h H h H>` (12 B): voltage_mv@0, current_ma@2, temp@4 (/10 °C),
+charge_voltage_mv@6, **soc@8 = direct percent (0..100)**, then 2 bytes. Verified:
+on the dock **16.33 V / 25.0 °C / charge 19.86 V / 100 %**; off-dock **16.08 V,
+356 mA discharge, charge 0.22 V, 86 %** — SOC tracks a 4S Li-ion curve. The W10
+SOC is a plain percent, not centi-percent (the Z10 `/100` was wrong here).
+
+## Messages to the MCU (from `ava`)
+
+From `alufers/dreame_mcu_protocol` + our RE. **MotorCtrl is captured and verified
+live** on the W10 via the `mcu-tx` tap; the rest are documented but not yet
+observed. Encoders are in [`proto`](../proto/src/lib.rs):
+
+| type | name | payload | notes |
+|------|------|---------|-------|
+| 0x00 | MotorCtrl | `<B f f>` = flag, linear, rotational | **[verified]** flag=1; linear **mm/s**, rotational **rad/s** (neg = CW) |
+| 0x01 | SetCleaning | `<B B B B B>` | fan/brush/pump levels (mapping TBD) |
+| 0x02 | SetButtonLED | `<B>` | LED state; **also the MCU heartbeat** |
+| 0x04 | SetOdometer | `<B I I I b>` | reset/seed odometry |
+| 0x11 | SetLDSCalibration | `<f f f>` | x, y, angle |
+| 0x1d | Laser/ToF control | `<B B>` | reset/enable |
+| 0x1f | CalibrateIMU | `<B>` | 0x01 start, 0x05 query |
+
+A full-replacement driver would additionally have to **answer 0x0f pings with a
+0x0f pong** and sustain the 0x02 LED/heartbeat, or the MCU flags a com fault.
+
+## Methodology (how to reproduce / extend)
+
+**Drive the robot** via Valetudo `HighResolutionManualControlCapability`
+(`PUT /api/v2/robot/capabilities/HighResolutionManualControlCapability`):
+
+```
+{"action":"enable"}
+{"action":"move","vector":{"velocity":<v>,"angle":<a>}}   # repeat < 700 ms (keepalive)
+{"action":"disable"}
+```
+
+Dreame maps `spdv = round(velocity*300)` (mm/s) and `spdw = round(-angle)`
+(deg/s). A **700 ms watchdog** auto-stops if you stop sending. **Rotation in
+place** (`velocity:0, angle:±15`) is the cleanest calibration input: it splits
+left/right wheels by sign and never translates off the dock.
+
+**Capture** with `w10-decode` against the relay:
+- `--mcu` — live decoded summary (odometry/IMU/battery/triggers).
+- `--watch` — per-offset volatility (min/max/`span` per byte) across all types;
+  good for a first look, but **1 Hz sampling aliases** the 50–100 Hz messages.
+- `--log 0x01` — every frame of one type at full rate (`ms  payload-hex`); this
+  is what pinned down the 0x01 offsets. Drive one clean single-axis motion and
+  find the i16 that behaves right (0 at rest, opposite signs when rotating).
+
+## Open items
+
+1. **0x03** offsets (wheel currents + consumable flag byte; pitch/roll need a
+   physical tilt — low priority, they're derivable from the 0x02 accel).
+2. **0x01** `edgeDis` / current fields (24/26/28) — confirm vs. Z10 analogy.
+3. Unknown W10 types **0x05, 0x23, 0x24, 0x2c**.
+4. Capture **SetCleaning (0x01)** and **SetButtonLED (0x02)** on `mcu-tx` while a
+   cleaning runs (MotorCtrl is already verified).
+5. **LDS** scan format on ttyS3 (`lds-rx`) — capture during a cleaning/MappingPass
+   (the turret is off when idle).

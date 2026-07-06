@@ -1,0 +1,13 @@
+[package]
+name = "avatap-shm"
+version = "0.1.0"
+edition = "2021"
+description = "repr(C) shared ring buffers between the in-ava serial tap and the relay"
+license = "MIT"
+
+[lib]
+name = "avatap_shm"
+
+[dependencies]
+# no_std, no deps: pure repr(C) layout + pointer ring ops, shared by the no_std
+# cdylib tap and the std relay.
