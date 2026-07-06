@@ -312,9 +312,10 @@ impl Status10ms {
 /// both sit near 0 at rest and jump to ~300-430 while the wheels spin. `pitch@0`/
 /// `roll@2` are small signed values (deci-degrees assumed; ~-80/+14 = a slight
 /// dock-ramp tilt) that shift a little under motion — offsets confirmed, units not.
-/// `[8]` is a small signed value, **not** the Z10 consumable-flag bitfield (the
-/// `flags` accessors below are inherited from the Z10 and unverified on the W10 —
-/// removing the dustbin/tank to confirm was not done); `[10]` is a constant 0x12.
+/// `[8..10]` is a small signed load/current value (near 0 at rest, ~1-23 while
+/// vacuuming, ~27-343 while mopping — a pump/mop-load current candidate), **not**
+/// the Z10 consumable-flag bitfield (the `flags` accessors below are inherited from
+/// the Z10 and unverified on the W10); `[10]` is a constant 0x12.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Status100ms {
     pub pitch_ddeg: i16, // deci-degrees (offset verified; unit assumed)
@@ -614,11 +615,12 @@ pub fn encode_motor_ctrl(flag: u8, linear: f32, rotational: f32, out: &mut [u8])
 }
 
 /// `0x01` SetCleaning: **6** actuator-level bytes (verified live on the W10 by
-/// watching `ava`'s TX). `[0]`/`[1]` carry levels (idle `00 01`; the mop-dock
-/// self-clean cycle raised them to `23 3c` = 35/60); `[2..6]` stayed 0 for the
-/// fan/brush at the dock. Exact byte->actuator mapping is not pinned down (fan/
-/// water presets set while idle do not change this frame — levels are pushed only
-/// when an actuator actually runs).
+/// watching `ava`'s TX). Observed active frames: vacuuming `55 6e 96 00 03 00`
+/// (fan/brush levels in `[0..3]`, `[4]` = a mode) and mopping `01 01 00 d6 00 00`
+/// — so **`[3]` = water/pump level** (0 without water, `0xd6` while mopping) and
+/// `[0]/[1]/[2]` are the fan/brush levels. Per-level scaling (low/med/high) is not
+/// pinned down: `ava` re-sends this only at clean start, not on a mid-clean preset
+/// change. It is not emitted at all while idle.
 pub fn encode_set_cleaning(f: [u8; 6], out: &mut [u8]) -> Option<usize> {
     encode_frame(TX_SET_CLEANING, &f, out)
 }
