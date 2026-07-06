@@ -23,6 +23,7 @@
 //! See [`crl200s::CRL200SDriver`] for a complete example.
 
 pub mod crl200s;
+pub mod dreame_w10;
 
 #[cfg(feature = "mock")]
 pub mod mock;
@@ -31,6 +32,7 @@ use crate::config::Config;
 use crate::core::driver::DeviceDriver;
 use crate::error::{Error, Result};
 use crl200s::CRL200SDriver;
+use dreame_w10::DreameW10Driver;
 
 #[cfg(feature = "mock")]
 use mock::MockDriver;
@@ -49,6 +51,10 @@ pub fn create_device(config: &Config) -> Result<Box<dyn DeviceDriver>> {
     match config.device.device_type.as_str() {
         "crl200s" => {
             let driver = CRL200SDriver::new(config.device.clone())?;
+            Ok(Box::new(driver))
+        }
+        "dreame_w10" => {
+            let driver = DreameW10Driver::new(config.device.clone())?;
             Ok(Box::new(driver))
         }
         #[cfg(feature = "mock")]

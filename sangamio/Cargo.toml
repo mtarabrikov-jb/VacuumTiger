@@ -18,6 +18,9 @@ prost = { version = "0.13", default-features = false, features = ["std", "derive
 # Serial port (libudev not needed on embedded Linux)
 serialport = { version = "4.8", default-features = false }
 
+# Dreame W10 MCU protocol (shared with the over-ava bridge tap/relay)
+dreame-w10-proto = { path = "../dreame-w10/proto" }
+
 # Logging
 log = "0.4"
 env_logger = { version = "0.10", default-features = false, features = ["humantime"] }

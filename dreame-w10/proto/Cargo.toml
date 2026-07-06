@@ -1,0 +1,13 @@
+[package]
+name = "dreame-w10-proto"
+version = "0.1.0"
+edition = "2021"
+description = "Dreame W10 MCU (ttyS4) framed binary protocol: parsing and command encoding"
+license = "MIT"
+
+[lib]
+name = "dreame_w10_proto"
+
+[dependencies]
+# no_std, no external deps — pure parsing so both the no_std tap and the std
+# SangamIO driver can share it.

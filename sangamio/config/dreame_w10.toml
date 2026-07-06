@@ -1,0 +1,23 @@
+# Dreame Bot W10 (r2104) — "over-ava" bridge.
+#
+# SangamIO does NOT open the robot's serial ports here (ava owns them). Instead
+# it connects to the read-only tap relay (avatap-relay, from ../dreame-w10) and
+# decodes the mirrored MCU stream. Run the tap+relay on the robot first
+# (see ../dreame-w10/README.md: make inject).
+
+[device]
+type = "dreame_w10"
+name = "Dreame Bot W10 (over-ava)"
+
+[device.hardware]
+# Repurposed as TCP endpoints of the tap relay, NOT serial paths. Defaults are
+# loopback (SangamIO running ON the robot). To run SangamIO on another machine,
+# set the W10_MCU_ADDR environment variable instead of editing this file, e.g.
+#   W10_MCU_ADDR=<robot-ip>:7701 sangamio --config dreame_w10.toml
+gd32_port = "127.0.0.1:7701"    # avatap-relay mcu-rx (decoded MCU telemetry)
+lidar_port = "127.0.0.1:7702"   # avatap-relay lds-rx (reserved; LDS not decoded yet)
+# Required by the shared HardwareConfig but unused for this device:
+heartbeat_interval_ms = 20
+
+[network]
+bind_address = "0.0.0.0:5555"

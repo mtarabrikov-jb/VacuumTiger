@@ -534,6 +534,18 @@ impl Config {
                     )));
                 }
             }
+            "dreame_w10" => {
+                // Over-ava bridge: `hardware` is required, but its ports are TCP
+                // endpoints of the tap relay (gd32_port = mcu-rx "host:port"), so
+                // the serial/heartbeat constraints do not apply.
+                if config.device.hardware.is_none() {
+                    return Err(Error::Config(
+                        "dreame_w10 device requires [device.hardware] with gd32_port set to the \
+                         relay mcu-rx endpoint (e.g. \"10.0.5.13:7701\")"
+                            .to_string(),
+                    ));
+                }
+            }
             #[cfg(feature = "mock")]
             "mock" => {
                 // Simulation config is required for mock device
