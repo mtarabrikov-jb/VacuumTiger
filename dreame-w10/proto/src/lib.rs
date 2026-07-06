@@ -215,7 +215,9 @@ pub fn parse_body(body: &[u8]) -> Result<(u8, &[u8]), FrameError> {
 /// offset 16 (they read `0xA5A5A5A5` at rest), shifting the velocity/current
 /// fields by +4. Confirmed: yaw@12 swept with rotation; x@4/y@8 stayed constant
 /// during in-place rotation; leftVel@20 / rightVel@22 are 0 at rest and take
-/// opposite signs when rotating.
+/// opposite signs when rotating. **`roller_current@26` and `sidebrush_current@28`
+/// verified during a cleaning run** (0..~4 at rest -> ~478 / ~106 with the brushes
+/// spinning). `edge_dis_mm@24` stayed 0 even while cleaning (unconfirmed).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Status20ms {
     pub timestamp_us: u32,
