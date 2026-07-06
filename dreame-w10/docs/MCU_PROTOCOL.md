@@ -53,7 +53,7 @@ Observed types and rates (measured via the tap; ratios cross-checked, e.g.
 | 0x05 | slow timer / RTC-like counter | 6 | ~500 ms | [partial] — monotonic, opaque |
 | 0x0f | Ping (SoC pongs 0x0f) | 8 | ~500 ms | **[verified]** — `ava` replies with a 4 B pong |
 | 0x12 | timestamped status | 7 | ~100 ms | [partial] — `u32` ts + opaque bytes (`1d 01` const tail) |
-| 0x23 | dock/station status | 6 | ~100 ms | **[partial]** — `byte[2]` = dock tank flags: **bit 2 (0x04) = waste-water tank missing** [verified by A-B]; docked-all-present = `10 00 00 00 00 42` |
+| 0x23 | dock/station status | 6 | ~100 ms | **[partial]** — `byte[2]` = dock tank flags: **bit 0 = clean-water tank, bit 2 = waste-water tank missing** [both verified by A-B]; bit 1 likely the auto-empty dust bag (untested). Docked-all-present = `10 00 00 00 00 42` |
 | 0x24 | flag byte | 1 | ~500 ms | [partial] — `00` at idle |
 | 0x2b | BatteryStatus | 12 | ~1 s | [verified] |
 | 0x2c | slow cumulative counter | 10 | ~0.5 s | [partial] — `[1:3]` +2 over 12 s (uptime/stat?) |
@@ -196,8 +196,9 @@ left/right wheels by sign and never translates off the dock.
 Done this pass: **0x03 wheel currents** (in-place rotation) and **0x01 main/side
 brush currents** (a cleaning run), **SetCleaning/SetButtonLED/Pong** TX (captured
 live), the **0x12** type (new), the **dustbin flag** (`0x03[10]` bit 0) and the
-**waste-water-tank flag** (`0x23[2]` bit 2) — both by A-B removal tests — and the
-**LDS** scan format (see [`LDS_PROTOCOL.md`](LDS_PROTOCOL.md)). Remaining:
+**dock water-tank flags** (`0x23[2]` bit 0 = clean, bit 2 = waste) — all by A-B
+removal tests — and the **LDS** scan format (see
+[`LDS_PROTOCOL.md`](LDS_PROTOCOL.md)). Remaining:
 
 1. **0x03** flags@10 — bit 0 = dustbin [verified]; the remaining bits are the
    **mop** attachment (the byte went `0x12`→`0x00` when the mop was attached; the
@@ -205,11 +206,11 @@ live), the **0x12** type (new), the **dustbin flag** (`0x03[10]` bit 0) and the
    (derivable from the 0x02 accel gravity vector).
 2. **0x01** `edgeDis@24` reads 0 even while cleaning (cliff/edge sensor?) —
    `roller_current@26` / `sidebrush_current@28` are now [verified].
-3. **0x23** `byte[2]` dock tank flags — waste-water tank = bit 2 [verified]; the
-   clean-water tank and auto-empty dust bag are likely other bits of `byte[2]`
-   (pull each to map). Other opaque types: **0x05** (slow timer/RTC), **0x12**
-   (timestamped status), **0x24** (flag byte), **0x2c** (slow counter), and TX
-   **0x14 / 0x26**.
+3. **0x23** `byte[2]` dock tank flags — clean-water = bit 0, waste-water = bit 2
+   (both [verified]); bit 1 is likely the auto-empty dust bag (untested — open the
+   dock's bag compartment to confirm). Other opaque types: **0x05** (slow
+   timer/RTC), **0x12** (timestamped status), **0x24** (flag byte), **0x2c** (slow
+   counter), and TX **0x14 / 0x26**.
 4. **SetCleaning per-level scaling** — the byte roles are mapped (`[3]`=water/pump,
    `[0..3]`=fan/brush, `[4]`=mode), but the low/med/high value per level is not,
    because `ava` re-sends this frame only at clean start, not on a mid-clean preset
