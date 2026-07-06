@@ -74,9 +74,9 @@ fields by +4:
 | 16..19 | **reserved** | — | `0xA5A5A5A5` at rest (the +4 vs Z10) |
 | 20..21 | **leftVel** | i16 | **0 at rest; +35..+47 during CW rotation** ✓ |
 | 22..23 | **rightVel** | i16 | **0 at rest; −35..−45 during CW rotation** ✓ |
-| 24..25 | edgeDis | i16 | 0 at rest (assignment by Z10 analogy, unconfirmed) |
-| 26..27 | roller_current | i16 | rises with motor load (unconfirmed) |
-| 28..29 | sidebrush_current | i16 | rises with motor load (unconfirmed) |
+| 24..25 | edgeDis | i16 | **0 even while cleaning** — unconfirmed (cliff/edge sensor?) |
+| 26..27 | **roller_current** | i16 | **[verified]** ~0..4 at rest → ~478 with the main brush spinning |
+| 28..29 | **sidebrush_current** | i16 | **[verified]** ~1 at rest → ~106 with the side brush spinning |
 
 Verification: driving the robot in place via Valetudo (see Methodology) makes
 leftVel/rightVel take **opposite signs** (left forward + / right back − = CW),
@@ -148,7 +148,7 @@ Z10 reference, not yet observed. Encoders are in [`proto`](../proto/src/lib.rs):
 | type | name | payload | notes |
 |------|------|---------|-------|
 | 0x00 | MotorCtrl | `<B f f>` = flag, linear, rotational | **[verified]** flag=1; linear **mm/s**, rotational **rad/s** (neg = CW); ~50 Hz keepalive at 0 when idle |
-| 0x01 | SetCleaning | **6 bytes** | **[verified live]** `[0]/[1]` = actuator levels (idle `00 01`; mop-dock self-clean raised to `23 3c` = 35/60); `[2..6]`=0 (fan/brush at dock). Fan/water presets set while idle do **not** emit this — levels push only when an actuator runs |
+| 0x01 | SetCleaning | **6 bytes** | **[verified live]** actuator levels. Idle `00 01 00 00 00 00`; mop-dock self-clean `23 3c ..`; active vacuuming `55 6e 96 00 03 00`. Per-byte fan/water/brush mapping unresolved (frames are sparse + state-dependent; **water/pump need the mop pads installed** — the pump doesn't run without them). Presets set while idle do **not** emit this — levels push only when an actuator runs |
 | 0x02 | SetButtonLED | `<B>` | **[verified live]** LED-state enum: `0x21` idle, `0x02` after Locate, `0x04` during mop-dock clean; also the MCU heartbeat |
 | 0x0f | Pong | 4 bytes | **[verified live]** `ava`'s reply to the MCU `0x0f` ping (echoes the ping payload) |
 | 0x14 | ? (sound/LED) | `<B B>` | **[observed]** rapid `01 01`/`00 01` toggles during Locate; idle `04 00`, mop-clean `04 01` |
@@ -188,17 +188,19 @@ left/right wheels by sign and never translates off the dock.
 
 ## Open items
 
-Done this pass: **0x03 wheel currents** (verified by in-place rotation),
-**SetCleaning/SetButtonLED/Pong** TX (captured live), the **0x12** type (new), and
-the **LDS** scan format (see [`LDS_PROTOCOL.md`](LDS_PROTOCOL.md)). Remaining:
+Done this pass: **0x03 wheel currents** (in-place rotation) and **0x01 main/side
+brush currents** (a cleaning run), **SetCleaning/SetButtonLED/Pong** TX (captured
+live), the **0x12** type (new), and the **LDS** scan format (see
+[`LDS_PROTOCOL.md`](LDS_PROTOCOL.md)). Remaining:
 
 1. **0x03** — where the W10's dustbin/water/carpet flags live (byte 8 is *not* the
    Z10 bitfield; needs physically pulling the bin/tank), and pitch/roll units (low
    priority — derivable from the 0x02 accel gravity vector).
-2. **0x01** `edgeDis`/roller/sidebrush currents (offsets 24/26/28) — confirm by
-   running those actuators in isolation (needs a cleaning run).
+2. **0x01** `edgeDis@24` reads 0 even while cleaning (cliff/edge sensor?) —
+   `roller_current@26` / `sidebrush_current@28` are now [verified].
 3. Exact semantics of the recurring opaque types **0x05** (slow timer/RTC),
    **0x12** (timestamped status), **0x23** (dock status — undock to decode),
    **0x24** (flag byte), **0x2c** (slow counter), and TX **0x14 / 0x26**.
-4. **SetCleaning byte->actuator mapping**: `[0]/[1]` are levels, but fan vs. water
-   vs. brush per byte is unmapped (run one actuator at a time during a cleaning).
+4. **SetCleaning byte→actuator mapping** (fan vs. water vs. brush per byte) —
+   frames are sparse, and the **water/pump bytes need the mop pads installed**
+   (the pump doesn't run without them, so water tests are inert right now).
