@@ -44,18 +44,19 @@ Verified: **0 CRC errors over many thousands of frames** through the live tap.
 Observed types and rates (measured via the tap; ratios cross-checked, e.g.
 `n(0x02)/n(0x01) ≈ 2.0`, `n(0x01)/n(0x03) ≈ 5.0`):
 
-| type | name | period | status |
-|------|------|--------|--------|
-| 0x00 | Triggers | ~100 ms | [verified] |
-| 0x01 | Status20ms (pose/velocity) | 20 ms | [verified] |
-| 0x02 | Status10ms (IMU/odometry) | 10 ms | [verified] |
-| 0x03 | Status100ms (tilt/currents) | 100 ms | [partial] |
-| 0x05 | Status500ms (RTC) | 500 ms | [unknown] on W10 |
-| 0x0f | Ping (SoC must pong 0x0f) | ~500 ms | documented, not verified |
-| 0x23 | ? (base/station related on Z10) | ~100 ms | [unknown] W10 |
-| 0x24 | ? (battery-temp bit on Z10) | ~500 ms | [unknown] W10 |
-| 0x2b | BatteryStatus | ~1 s | [verified] |
-| 0x2c | ? (not in Z10 dict) | ~0.5 s | [unknown] W10-only |
+| type | name | len | period | status |
+|------|------|-----|--------|--------|
+| 0x00 | Triggers | 7 | ~100 ms | [verified] |
+| 0x01 | Status20ms (pose/velocity) | 30 | 20 ms | [verified] |
+| 0x02 | Status10ms (IMU/odometry) | 18 | 10 ms | [verified] |
+| 0x03 | Status100ms (tilt/currents) | 11 | 100 ms | **[verified]** currents; tilt [partial] |
+| 0x05 | slow timer / RTC-like counter | 6 | ~500 ms | [partial] — monotonic, opaque |
+| 0x0f | Ping (SoC pongs 0x0f) | 8 | ~500 ms | **[verified]** — `ava` replies with a 4 B pong |
+| 0x12 | timestamped status | 7 | ~100 ms | [partial] — `u32` ts + opaque bytes (`1d 01` const tail) |
+| 0x23 | dock/station status | 6 | ~100 ms | [partial] — constant `10 00 00 00 00 42` while docked |
+| 0x24 | flag byte | 1 | ~500 ms | [partial] — `00` at idle |
+| 0x2b | BatteryStatus | 12 | ~1 s | [verified] |
+| 0x2c | slow cumulative counter | 10 | ~0.5 s | [partial] — `[1:3]` +2 over 12 s (uptime/stat?) |
 
 ### 0x01 Status20ms — **W10 layout, 30 bytes [verified]**
 
@@ -98,14 +99,28 @@ leftDis@16, rightDis@17 (both `i8`). Verified live:
   range 0..1 at ~40 mm/s; over a forward-then-CW-rotate run summed to
   `+501 / −47` (forward adds to both; CW rotation adds to left, subtracts right).
 
-### 0x03 Status100ms — tilt / currents / consumables [partial]
+### 0x03 Status100ms — tilt / wheel currents [verified currents]
 
-W10 payload is **11 bytes** (Z10 was 9). A resting frame:
-`a8 ff 23 00 02 00 04 00 ff ff 12`. The last byte (`0x12`) is a stable
-flag-byte candidate (consumables). The remaining i16 fields (Z10:
-pitch, roll, leftCurrent, rightCurrent) don't map cleanly at the Z10 offsets and
-need a **physical tilt** (pitch/roll) and a **drive** (wheel currents) to pin
-down — low priority, since pitch/roll are already available from the 0x02
+W10 payload is **11 bytes** (Z10 was 9). Resting frame:
+`b0 ff 25 00 02 00 04 00 01 00 12`.
+
+| offset | field | i16 at rest | i16 rotating in place | verdict |
+|--------|-------|-------------|-----------------------|---------|
+| 0..1   | pitch | ~-80 | ~-110 | [partial] deci-deg assumed; ~-8° = dock-ramp tilt |
+| 2..3   | roll  | ~+14 | ~-13 | [partial] shifts under motion |
+| 4..5   | **left_current**  | ~0 | **310..430** | **[verified]** |
+| 6..7   | **right_current** | ~0 | **297..370** | **[verified]** |
+| 8..9   | ? | ~0 (±1) | 2..8 | [partial] small signed, **not** the Z10 consumable bitfield |
+| 10     | ? | `0x12` | `0x12` | constant marker |
+
+Verification: an in-place rotation via Valetudo manual control (wheels only, no
+pump) makes `left_current@4` and `right_current@6` jump from ~0 to ~300-430 while
+every other field barely moves — the unambiguous "both wheels drawing current"
+signature. This corrects the earlier `[partial]`: the currents are the Z10
+offsets (4/6) after all. The Z10 consumable-flag bits do **not** live at byte 8 on
+the W10 (byte 8 reads a small signed value, not a stable bitfield); where the
+dustbin/water/carpet flags are on the W10 is still open (needs physically pulling
+the bin/tank to confirm). Pitch/roll are also available from the 0x02
 accelerometer gravity vector.
 
 ### 0x00 Triggers — bit flags [verified]
@@ -126,22 +141,26 @@ SOC is a plain percent, not centi-percent (the Z10 `/100` was wrong here).
 
 ## Messages to the MCU (from `ava`)
 
-From `alufers/dreame_mcu_protocol` + our RE. **MotorCtrl is captured and verified
-live** on the W10 via the `mcu-tx` tap; the rest are documented but not yet
-observed. Encoders are in [`proto`](../proto/src/lib.rs):
+From `alufers/dreame_mcu_protocol` + our RE. **Several TX types are now captured
+and verified live** on the W10 via the `mcu-tx` tap (marked below); the rest are
+Z10 reference, not yet observed. Encoders are in [`proto`](../proto/src/lib.rs):
 
 | type | name | payload | notes |
 |------|------|---------|-------|
-| 0x00 | MotorCtrl | `<B f f>` = flag, linear, rotational | **[verified]** flag=1; linear **mm/s**, rotational **rad/s** (neg = CW) |
-| 0x01 | SetCleaning | `<B B B B B>` | fan/brush/pump levels (mapping TBD) |
-| 0x02 | SetButtonLED | `<B>` | LED state; **also the MCU heartbeat** |
-| 0x04 | SetOdometer | `<B I I I b>` | reset/seed odometry |
-| 0x11 | SetLDSCalibration | `<f f f>` | x, y, angle |
-| 0x1d | Laser/ToF control | `<B B>` | reset/enable |
-| 0x1f | CalibrateIMU | `<B>` | 0x01 start, 0x05 query |
+| 0x00 | MotorCtrl | `<B f f>` = flag, linear, rotational | **[verified]** flag=1; linear **mm/s**, rotational **rad/s** (neg = CW); ~50 Hz keepalive at 0 when idle |
+| 0x01 | SetCleaning | **6 bytes** | **[verified live]** `[0]/[1]` = actuator levels (idle `00 01`; mop-dock self-clean raised to `23 3c` = 35/60); `[2..6]`=0 (fan/brush at dock). Fan/water presets set while idle do **not** emit this — levels push only when an actuator runs |
+| 0x02 | SetButtonLED | `<B>` | **[verified live]** LED-state enum: `0x21` idle, `0x02` after Locate, `0x04` during mop-dock clean; also the MCU heartbeat |
+| 0x0f | Pong | 4 bytes | **[verified live]** `ava`'s reply to the MCU `0x0f` ping (echoes the ping payload) |
+| 0x14 | ? (sound/LED) | `<B B>` | **[observed]** rapid `01 01`/`00 01` toggles during Locate; idle `04 00`, mop-clean `04 01` |
+| 0x1d | Laser/ToF control? | `<B B>` | **[observed]** one-shot `05 01` right after Locate |
+| 0x26 | ? status/level | 8 bytes | **[observed]** `[0]` = level (idle `0x64`=100, drops to 8-18 under activity), `[7]`=`0x04` const |
+| 0x04 | SetOdometer | `<B I I I b>` | Z10 ref, not observed |
+| 0x11 | SetLDSCalibration | `<f f f>` | Z10 ref, not observed |
+| 0x1f | CalibrateIMU | `<B>` | Z10 ref, not observed |
 
-A full-replacement driver would additionally have to **answer 0x0f pings with a
-0x0f pong** and sustain the 0x02 LED/heartbeat, or the MCU flags a com fault.
+The MCU `0x0f` ping / `ava` `0x0f` pong exchange is **confirmed live** (the SoC
+answers every ping). A full-replacement driver must reproduce that pong and
+sustain the `0x02` LED/heartbeat, or the MCU flags a com fault.
 
 ## Methodology (how to reproduce / extend)
 
@@ -169,11 +188,17 @@ left/right wheels by sign and never translates off the dock.
 
 ## Open items
 
-1. **0x03** offsets (wheel currents + consumable flag byte; pitch/roll need a
-   physical tilt — low priority, they're derivable from the 0x02 accel).
-2. **0x01** `edgeDis` / current fields (24/26/28) — confirm vs. Z10 analogy.
-3. Unknown W10 types **0x05, 0x23, 0x24, 0x2c**.
-4. Capture **SetCleaning (0x01)** and **SetButtonLED (0x02)** on `mcu-tx` while a
-   cleaning runs (MotorCtrl is already verified).
-5. **LDS** scan format on ttyS3 (`lds-rx`) — capture during a cleaning/MappingPass
-   (the turret is off when idle).
+Done this pass: **0x03 wheel currents** (verified by in-place rotation),
+**SetCleaning/SetButtonLED/Pong** TX (captured live), the **0x12** type (new), and
+the **LDS** scan format (see [`LDS_PROTOCOL.md`](LDS_PROTOCOL.md)). Remaining:
+
+1. **0x03** — where the W10's dustbin/water/carpet flags live (byte 8 is *not* the
+   Z10 bitfield; needs physically pulling the bin/tank), and pitch/roll units (low
+   priority — derivable from the 0x02 accel gravity vector).
+2. **0x01** `edgeDis`/roller/sidebrush currents (offsets 24/26/28) — confirm by
+   running those actuators in isolation (needs a cleaning run).
+3. Exact semantics of the recurring opaque types **0x05** (slow timer/RTC),
+   **0x12** (timestamped status), **0x23** (dock status — undock to decode),
+   **0x24** (flag byte), **0x2c** (slow counter), and TX **0x14 / 0x26**.
+4. **SetCleaning byte->actuator mapping**: `[0]/[1]` are levels, but fan vs. water
+   vs. brush per byte is unmapped (run one actuator at a time during a cleaning).
