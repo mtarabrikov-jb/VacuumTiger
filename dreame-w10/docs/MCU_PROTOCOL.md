@@ -110,18 +110,19 @@ W10 payload is **11 bytes** (Z10 was 9). Resting frame:
 | 2..3   | roll  | ~+14 | ~-13 | [partial] shifts under motion |
 | 4..5   | **left_current**  | ~0 | **310..430** | **[verified]** |
 | 6..7   | **right_current** | ~0 | **297..370** | **[verified]** |
-| 8..9   | ? | ~0 (±1) | 2..8 | [partial] small signed, **not** the Z10 consumable bitfield |
+| 8..9   | load/current | ~0 (±1) | vac 1..23; **mop 27..343** | [partial] pump/mop-load candidate; **not** the Z10 flag bitfield |
 | 10     | ? | `0x12` | `0x12` | constant marker |
 
 Verification: an in-place rotation via Valetudo manual control (wheels only, no
 pump) makes `left_current@4` and `right_current@6` jump from ~0 to ~300-430 while
 every other field barely moves — the unambiguous "both wheels drawing current"
 signature. This corrects the earlier `[partial]`: the currents are the Z10
-offsets (4/6) after all. The Z10 consumable-flag bits do **not** live at byte 8 on
-the W10 (byte 8 reads a small signed value, not a stable bitfield); where the
-dustbin/water/carpet flags are on the W10 is still open (needs physically pulling
-the bin/tank to confirm). Pitch/roll are also available from the 0x02
-accelerometer gravity vector.
+offsets (4/6) after all. Byte 8 is a small signed load/current value (near 0 at
+rest, ~1-23 vacuuming, **~27-343 while mopping** — a pump/mop-load candidate), so
+it is **not** the Z10 consumable-flag bitfield; where the dustbin/water/carpet
+flags are on the W10 is still open (needs physically pulling the bin/tank to
+confirm). Pitch/roll are also available from the 0x02 accelerometer gravity
+vector.
 
 ### 0x00 Triggers — bit flags [verified]
 
@@ -148,7 +149,7 @@ Z10 reference, not yet observed. Encoders are in [`proto`](../proto/src/lib.rs):
 | type | name | payload | notes |
 |------|------|---------|-------|
 | 0x00 | MotorCtrl | `<B f f>` = flag, linear, rotational | **[verified]** flag=1; linear **mm/s**, rotational **rad/s** (neg = CW); ~50 Hz keepalive at 0 when idle |
-| 0x01 | SetCleaning | **6 bytes** | **[verified live]** actuator levels. Idle `00 01 00 00 00 00`; mop-dock self-clean `23 3c ..`; active vacuuming `55 6e 96 00 03 00`. Per-byte fan/water/brush mapping unresolved (frames are sparse + state-dependent; **water/pump need the mop pads installed** — the pump doesn't run without them). Presets set while idle do **not** emit this — levels push only when an actuator runs |
+| 0x01 | SetCleaning | **6 bytes** | **[verified live]** actuator levels. Idle `00 01 00 00 00 00`; vacuuming `55 6e 96 00 03 00` (fan/brush in `[0..3]`, `[4]`=mode); mopping `01 01 00 d6 00 00` → **`[3]` = water/pump level** (0 without water, `0xd6` mopping). Per-level scaling (low/med/high) unresolved — `ava` re-sends only at clean start, not on a mid-clean preset change |
 | 0x02 | SetButtonLED | `<B>` | **[verified live]** LED-state enum: `0x21` idle, `0x02` after Locate, `0x04` during mop-dock clean; also the MCU heartbeat |
 | 0x0f | Pong | 4 bytes | **[verified live]** `ava`'s reply to the MCU `0x0f` ping (echoes the ping payload) |
 | 0x14 | ? (sound/LED) | `<B B>` | **[observed]** rapid `01 01`/`00 01` toggles during Locate; idle `04 00`, mop-clean `04 01` |
@@ -201,6 +202,7 @@ live), the **0x12** type (new), and the **LDS** scan format (see
 3. Exact semantics of the recurring opaque types **0x05** (slow timer/RTC),
    **0x12** (timestamped status), **0x23** (dock status — undock to decode),
    **0x24** (flag byte), **0x2c** (slow counter), and TX **0x14 / 0x26**.
-4. **SetCleaning byte→actuator mapping** (fan vs. water vs. brush per byte) —
-   frames are sparse, and the **water/pump bytes need the mop pads installed**
-   (the pump doesn't run without them, so water tests are inert right now).
+4. **SetCleaning per-level scaling** — the byte roles are mapped (`[3]`=water/pump,
+   `[0..3]`=fan/brush, `[4]`=mode), but the low/med/high value per level is not,
+   because `ava` re-sends this frame only at clean start, not on a mid-clean preset
+   change.
