@@ -111,7 +111,7 @@ W10 payload is **11 bytes** (Z10 was 9). Resting frame:
 | 4..5   | **left_current**  | ~0 | **310..430** | **[verified]** |
 | 6..7   | **right_current** | ~0 | **297..370** | **[verified]** |
 | 8..9   | load/current | ~0 (±1) | vac 1..23; **mop 27..343** | [partial] pump/mop-load candidate; **not** the Z10 flag bitfield |
-| 10     | ? | `0x12` | `0x12` | constant marker |
+| 10     | **flags** | `0x00` (bin in) | `0x01` (bin out) | **[verified]** consumables/attachment bitfield — **bit 0 = dustbin missing** (bin in/out A-B test); other bits track mop/tank (`0x12` no-mop → `0x00` with mop) |
 
 Verification: an in-place rotation via Valetudo manual control (wheels only, no
 pump) makes `left_current@4` and `right_current@6` jump from ~0 to ~300-430 while
@@ -119,9 +119,13 @@ every other field barely moves — the unambiguous "both wheels drawing current"
 signature. This corrects the earlier `[partial]`: the currents are the Z10
 offsets (4/6) after all. Byte 8 is a small signed load/current value (near 0 at
 rest, ~1-23 vacuuming, **~27-343 while mopping** — a pump/mop-load candidate), so
-it is **not** the Z10 consumable-flag bitfield; where the dustbin/water/carpet
-flags are on the W10 is still open (needs physically pulling the bin/tank to
-confirm). Pitch/roll are also available from the 0x02 accelerometer gravity
+it is **not** the Z10 consumable-flag bitfield. The consumable/attachment flags
+are at **byte 10**: an A-B test (pull the bin, reinsert it, mop unchanged) flipped
+`byte[10]` bit 0 (`0x00` bin-in → `0x01` bin-out) with nothing else stable
+changing, so **`byte[10]` bit 0 = dustbin missing [verified]**. The byte also read
+`0x12` before the mop was attached and `0x00` after, so its other bits carry
+mop/tank state (exact bits still to be split — pull the water tank to map them).
+Pitch/roll are also available from the 0x02 accelerometer gravity
 vector.
 
 ### 0x00 Triggers — bit flags [verified]
@@ -194,9 +198,9 @@ brush currents** (a cleaning run), **SetCleaning/SetButtonLED/Pong** TX (capture
 live), the **0x12** type (new), and the **LDS** scan format (see
 [`LDS_PROTOCOL.md`](LDS_PROTOCOL.md)). Remaining:
 
-1. **0x03** — where the W10's dustbin/water/carpet flags live (byte 8 is *not* the
-   Z10 bitfield; needs physically pulling the bin/tank), and pitch/roll units (low
-   priority — derivable from the 0x02 accel gravity vector).
+1. **0x03** flags@10 — bit 0 = dustbin (verified); the mop/water-tank bits still
+   need splitting (pull the water tank to map them). Pitch/roll units are low
+   priority (derivable from the 0x02 accel gravity vector).
 2. **0x01** `edgeDis@24` reads 0 even while cleaning (cliff/edge sensor?) —
    `roller_current@26` / `sidebrush_current@28` are now [verified].
 3. Exact semantics of the recurring opaque types **0x05** (slow timer/RTC),
