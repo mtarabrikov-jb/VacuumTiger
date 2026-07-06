@@ -307,26 +307,29 @@ impl Status10ms {
     }
 }
 
-/// `0x03` @100ms — tilt, wheel currents, flags. **W10: 11 bytes.** Wheel currents
-/// **[verified]** by rotating in place: `left_current@4` and `right_current@6`
-/// both sit near 0 at rest and jump to ~300-430 while the wheels spin. `pitch@0`/
-/// `roll@2` are small signed values (deci-degrees assumed; ~-80/+14 = a slight
-/// dock-ramp tilt) that shift a little under motion — offsets confirmed, units not.
-/// `[8..10]` is a small signed load/current value (near 0 at rest, ~1-23 while
-/// vacuuming, ~27-343 while mopping — a pump/mop-load current candidate), **not**
-/// the Z10 consumable-flag bitfield (the `flags` accessors below are inherited from
-/// the Z10 and unverified on the W10); `[10]` is a constant 0x12.
+/// `0x03` @100ms — tilt, wheel currents, load, consumable flags. **W10: 11 bytes.**
+/// Wheel currents **[verified]** by rotating in place: `left_current@4` and
+/// `right_current@6` sit near 0 at rest and jump to ~300-430 while the wheels spin.
+/// `pitch@0`/`roll@2` are small signed values (deci-degrees assumed; ~-80/+14 = a
+/// slight dock-ramp tilt) that shift under motion — offsets confirmed, units not.
+/// `load@8` is a signed load/current (near 0 at rest, ~1-23 vacuuming, ~27-343
+/// mopping — a pump/mop-load candidate). **`flags@10` is the consumables/attachment
+/// bitfield: bit 0 = dustbin missing [verified] (1 when the bin is pulled, 0 when
+/// present, isolated by a bin in/out A-B test); the other bits track mop/tank (the
+/// byte read `0x12` with no mop and `0x00` with the mop attached) — those exact bit
+/// assignments are the Z10 analogy, unverified.**
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Status100ms {
-    pub pitch_ddeg: i16, // deci-degrees (offset verified; unit assumed)
-    pub roll_ddeg: i16,
-    pub left_current: i16,  // [verified] ~0 at rest, ~300-430 spinning
-    pub right_current: i16, // [verified] ~0 at rest, ~300-430 spinning
-    pub flags: u8,          // [8]: small signed, NOT a confirmed W10 bitfield
+    pub pitch_ddeg: i16, // [0] deci-degrees (offset verified; unit assumed)
+    pub roll_ddeg: i16,  // [2]
+    pub left_current: i16,  // [4] [verified] ~0 at rest, ~300-430 spinning
+    pub right_current: i16, // [6] [verified]
+    pub load: i16,          // [8] pump/mop-load current candidate
+    pub flags: u8,          // [10] consumables/attachment bitfield
 }
 
 impl Status100ms {
-    pub const MIN_LEN: usize = 9;
+    pub const MIN_LEN: usize = 11;
     pub fn parse(p: &[u8]) -> Option<Self> {
         if p.len() < Self::MIN_LEN {
             return None;
@@ -336,9 +339,11 @@ impl Status100ms {
             roll_ddeg: i16le(p, 2),
             left_current: i16le(p, 4),
             right_current: i16le(p, 6),
-            flags: p[8],
+            load: i16le(p, 8),
+            flags: p[10],
         })
     }
+    /// **[verified]** bit 0 of `flags@10`: true when the dust bin is removed.
     #[inline]
     pub fn dust_container_missing(&self) -> bool {
         self.flags & 1 != 0
