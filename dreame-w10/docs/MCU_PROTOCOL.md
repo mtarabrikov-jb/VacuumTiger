@@ -53,7 +53,7 @@ Observed types and rates (measured via the tap; ratios cross-checked, e.g.
 | 0x05 | slow timer / RTC-like counter | 6 | ~500 ms | [partial] — monotonic, opaque |
 | 0x0f | Ping (SoC pongs 0x0f) | 8 | ~500 ms | **[verified]** — `ava` replies with a 4 B pong |
 | 0x12 | timestamped status | 7 | ~100 ms | [partial] — `u32` ts + opaque bytes (`1d 01` const tail) |
-| 0x23 | dock/station status | 6 | ~100 ms | **[partial]** — `byte[2]` = dock tank flags: **bit 0 = clean-water tank, bit 2 = waste-water tank missing** [both verified by A-B]; bit 1 likely the auto-empty dust bag (untested). Docked-all-present = `10 00 00 00 00 42` |
+| 0x23 | dock/station status | 6 | ~100 ms | **[partial]** — `byte[2]` = dock tank flags: **bit 0 = clean-water tank, bit 2 = waste-water tank missing** [both verified by A-B, all-present = 0]; bit 1 unknown/unused (this W10 has no auto-empty dust bag). Docked-all-present = `10 00 00 00 00 42` |
 | 0x24 | flag byte | 1 | ~500 ms | [partial] — `00` at idle |
 | 0x2b | BatteryStatus | 12 | ~1 s | [verified] |
 | 0x2c | slow cumulative counter | 10 | ~0.5 s | [partial] — `[1:3]` +2 over 12 s (uptime/stat?) |
@@ -207,10 +207,9 @@ removal tests — and the **LDS** scan format (see
 2. **0x01** `edgeDis@24` reads 0 even while cleaning (cliff/edge sensor?) —
    `roller_current@26` / `sidebrush_current@28` are now [verified].
 3. **0x23** `byte[2]` dock tank flags — clean-water = bit 0, waste-water = bit 2
-   (both [verified]); bit 1 is likely the auto-empty dust bag (untested — open the
-   dock's bag compartment to confirm). Other opaque types: **0x05** (slow
-   timer/RTC), **0x12** (timestamped status), **0x24** (flag byte), **0x2c** (slow
-   counter), and TX **0x14 / 0x26**.
+   (both [verified]); bit 1 unknown/unused (this W10 has no auto-empty dust bag).
+   Other opaque types: **0x05** (slow timer/RTC), **0x12** (timestamped status),
+   **0x24** (flag byte), **0x2c** (slow counter), and TX **0x14 / 0x26**.
 4. **SetCleaning per-level scaling** — the byte roles are mapped (`[3]`=water/pump,
    `[0..3]`=fan/brush, `[4]`=mode), but the low/med/high value per level is not,
    because `ava` re-sends this frame only at clean start, not on a mid-clean preset
