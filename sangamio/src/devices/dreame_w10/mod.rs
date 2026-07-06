@@ -18,12 +18,21 @@
 //! - Battery (0x2b): `battery_voltage` (F32 V), `battery_level` (U8 %),
 //!   `is_charging` (Bool)
 //!
+//! # Sensor group `lidar`
+//! - `scan`: `PointCloud2D` of `(angle_rad, distance_m, quality)` from the LDS
+//!   relay (`lds-rx`), one arc sweep per publish. **Caveat:** the tapped ttyS3
+//!   feed is a fixed ~126 deg rear arc (~226-352 deg), not a full circle, and the
+//!   angle is the raw sensor angle (frame/orientation vs. robot-forward is not
+//!   yet calibrated — no mounting transform is applied). See
+//!   `../dreame-w10/docs/LDS_PROTOCOL.md`.
+//! - `speed_raw`: `U16` turret speed (raw units, not RPM).
+//!
 //! # Config
 //! `gd32_port` is repurposed as the relay MCU endpoint `host:port` (defaults to
 //! `127.0.0.1:7701` for SangamIO running on the robot). The `W10_MCU_ADDR`
 //! environment variable overrides it — use that to point at a remote robot
-//! without putting its address in any file. `lidar_port` (the `lds-rx`
-//! endpoint) is reserved for when the LDS scan format is decoded.
+//! without putting its address in any file. `lidar_port` is the relay `lds-rx`
+//! endpoint (default `127.0.0.1:7702`), overridable via `W10_LDS_ADDR`.
 //!
 //! # Commands
 //! Read-only: `ava` retains motor/actuator control, so drive/actuator commands
@@ -35,6 +44,7 @@ use crate::core::types::{
     Command, SensorGroupData, SensorValue, StreamSender, create_stream_channel,
 };
 use crate::error::{Error, Result};
+use dreame_w10_proto::lds::LdsScanner;
 use dreame_w10_proto::{FrameScanner, Msg, parse_body};
 use std::collections::HashMap;
 use std::io::Read;
@@ -42,12 +52,13 @@ use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub struct DreameW10Driver {
     config: DeviceConfig,
     shutdown: Arc<AtomicBool>,
     reader: Option<JoinHandle<()>>,
+    lds_reader: Option<JoinHandle<()>>,
 }
 
 impl DreameW10Driver {
@@ -56,6 +67,7 @@ impl DreameW10Driver {
             config,
             shutdown: Arc::new(AtomicBool::new(false)),
             reader: None,
+            lds_reader: None,
         })
     }
 }
@@ -89,6 +101,20 @@ impl DeviceDriver for DreameW10Driver {
                 .map_err(|e| Error::Config(format!("failed to spawn reader: {e}")))?,
         );
 
+        // LDS relay lds-rx endpoint: W10_LDS_ADDR env wins, else lidar_port.
+        let lds_addr =
+            std::env::var("W10_LDS_ADDR").unwrap_or_else(|_| hardware.lidar_port.clone());
+        log::info!("Dreame W10 (over-ava): LDS relay at {}", lds_addr);
+        let lidar = Arc::new(Mutex::new(SensorGroupData::new("lidar")));
+        sensor_data.insert("lidar".to_string(), lidar.clone());
+        let lds_shutdown = self.shutdown.clone();
+        self.lds_reader = Some(
+            thread::Builder::new()
+                .name("w10-lds-reader".to_string())
+                .spawn(move || lds_reader_loop(lds_addr, lidar, lds_shutdown))
+                .map_err(|e| Error::Config(format!("failed to spawn lds reader: {e}")))?,
+        );
+
         Ok(DriverInitResult {
             sensor_data,
             stream_receivers,
@@ -111,6 +137,9 @@ impl Drop for DreameW10Driver {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Relaxed);
         if let Some(h) = self.reader.take() {
+            let _ = h.join();
+        }
+        if let Some(h) = self.lds_reader.take() {
             let _ = h.join();
         }
     }
@@ -223,5 +252,101 @@ fn apply(d: &mut SensorGroupData, m: &Msg) -> bool {
             true
         }
         _ => false,
+    }
+}
+
+/// LDS reader: connect to the relay's `lds-rx` stream, decode packets, accumulate
+/// one arc sweep of points, and publish it to the `lidar` group. The W10's tapped
+/// feed is a fixed ~126 deg rear arc, so a "sweep" is one pass of that arc: `fsa`
+/// climbs, then jumps back down to the arc start — that reset is the publish
+/// boundary. Reconnects on any error so it survives relay/ava restarts.
+fn lds_reader_loop(addr: String, group: Arc<Mutex<SensorGroupData>>, shutdown: Arc<AtomicBool>) {
+    use std::f32::consts::TAU;
+    /// Minimum valid points before a sweep is worth publishing.
+    const MIN_POINTS: usize = 16;
+    /// A `fsa` drop larger than this (u16 units, ~22 deg) marks a new sweep.
+    const SWEEP_RESET: u16 = 4000;
+    /// Publish anyway after this long if no clean reset was seen.
+    const MAX_SWEEP: Duration = Duration::from_secs(1);
+
+    let mut sc = LdsScanner::new();
+    let mut buf = [0u8; 4096];
+    let mut points: Vec<(f32, f32, u8)> = Vec::with_capacity(512);
+
+    while !shutdown.load(Ordering::Relaxed) {
+        let mut stream = match TcpStream::connect(&addr) {
+            Ok(s) => {
+                let _ = s.set_read_timeout(Some(Duration::from_secs(2)));
+                log::info!("dreame_w10: connected to LDS relay {addr}");
+                s
+            }
+            Err(e) => {
+                log::warn!("dreame_w10: connect {addr} failed: {e}; retrying");
+                thread::sleep(Duration::from_millis(500));
+                continue;
+            }
+        };
+        // Fresh per-connection sweep state; reuse the points allocation.
+        points.clear();
+        let mut last_fsa: Option<u16> = None;
+        let mut sweep_start = Instant::now();
+
+        loop {
+            if shutdown.load(Ordering::Relaxed) {
+                return;
+            }
+            let n = match stream.read(&mut buf) {
+                Ok(0) => break, // relay closed
+                Ok(n) => n,
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    continue;
+                }
+                Err(e) => {
+                    log::warn!("dreame_w10: LDS read error: {e}; reconnecting");
+                    break;
+                }
+            };
+            for &b in &buf[..n] {
+                let Some(f) = sc.push(b) else { continue };
+                // Sweep boundary: fsa jumped back to the arc start.
+                if let Some(prev) = last_fsa {
+                    if f.fsa < prev && prev - f.fsa > SWEEP_RESET {
+                        if points.len() >= MIN_POINTS {
+                            publish_scan(&group, &points, f.speed);
+                        }
+                        points.clear();
+                        sweep_start = Instant::now();
+                    }
+                }
+                for k in 0..dreame_w10_proto::lds::LDS_SAMPLES {
+                    let s = f.samples[k];
+                    if !s.valid {
+                        continue;
+                    }
+                    let angle = f.sample_angle(k) as f32 / 65536.0 * TAU;
+                    let dist_m = s.dist_mm as f32 / 1000.0;
+                    points.push((angle, dist_m, s.quality.max(1)));
+                }
+                last_fsa = Some(f.fsa);
+                // Safety valve: never let a sweep grow unbounded if the reset is missed.
+                if sweep_start.elapsed() > MAX_SWEEP && points.len() >= MIN_POINTS {
+                    publish_scan(&group, &points, f.speed);
+                    points.clear();
+                    sweep_start = Instant::now();
+                }
+            }
+        }
+    }
+}
+
+/// Publish one accumulated arc sweep to the `lidar` group as a `PointCloud2D`.
+fn publish_scan(group: &Arc<Mutex<SensorGroupData>>, points: &[(f32, f32, u8)], speed: u16) {
+    if let Ok(mut d) = group.lock() {
+        d.touch();
+        d.set("scan", SensorValue::PointCloud2D(points.to_vec()));
+        d.set("speed_raw", SensorValue::U16(speed));
     }
 }
