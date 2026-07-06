@@ -20,7 +20,7 @@ also spins it.
 
 **Coverage [verified]: the tapped stream is a FIXED ~126 deg rear arc, not a full
 circle.** `fsa` stays within raw 40986-63995 (~**226-352 deg**) and never leaves
-it. This was checked two independent ways and is identical in both:
+it. This was checked several independent ways and is always identical:
 
 - **Manual control**, robot roughly stationary: sector 226-352 deg.
 - **Active SLAM navigation** (captured during a real return-to-dock, ~3125
@@ -30,9 +30,44 @@ it. This was checked two independent ways and is identical in both:
   packets in this arc; **no full-360 feed is present on ttyS3 at all**.
 
 So active navigation is *not* the way to get a full circle — this serial link
-simply does not carry one. Why only a sub-arc is exposed (physical sector
-scanner vs. `ava` reading the rest of the circle over a different interface) is an
-open question. The framing/scaling below are unaffected; only coverage is partial.
+simply does not carry one. The framing/scaling below are unaffected; only coverage
+is partial.
+
+### Why only ~126 deg [verified: it is the LDS itself, not `ava`]
+
+Three findings pin this down:
+
+1. **Uniform timing, no dark-arc pause.** Packets arrive evenly (~3.6 ms apart)
+   with no gap at the sweep boundary (`fsa` 352 -> 226 deg): the boundary
+   inter-arrival (~4 ms) equals the within-sweep one, and per-100 ms packet counts
+   never dip. If the turret spun a full 360 deg and transmitted only a 126 deg
+   window, the boundary would show an ~80x longer pause (~300 ms) while the beam
+   crossed the dark 234 deg. It does not — so the beam covers only the ~126 deg
+   arc: an effective sector scan, not a full spin with a transmit window. (The tap
+   mirrors `ava`'s `read()` in real time, so a real source-side silence would show
+   up as a gap; there is none.)
+
+2. **`ava` never writes to the LDS.** The `lds-tx` tap (`ava` -> ttyS3) captured
+   **0 bytes** across runtime, turret spin-up, AND a full `ava` reboot (killed
+   `ava`, captured continuously through its ~59 s respawn and first post-boot
+   spin). `ava` opens ttyS3 and only reads — it sends no init/config/mode command,
+   so the sector is not configured by `ava` at all. Immediately after a fresh boot
+   the sector is unchanged (225-352 deg). This rules out any `ava` init-handshake.
+
+3. **No config limits it.** `config.json` is a standard 360-capable SLAM setup
+   (`min_range 0.3`, `max_range 5`; its "angular window" values are scan-match
+   params, not a sensor FOV). `lds_config.json` holds the mounting calibration
+   (`theta -116 deg`, `x/y`) and 6 pillar-occlusion sectors spread across the full
+   circle (~62/120/182/240/302/356 deg) — only 3 of them (240/302/356) fall inside
+   the observed arc.
+
+**Conclusion:** the ~126 deg arc is intrinsic to the LDS unit (its hardware FOV or
+its own persistent firmware), independent of `ava`. The open puzzle is that the
+pillar calibration is laid out for a full 360 deg sensor yet ttyS3 delivers only
+126 deg; resolving that would need LDS-vendor info or probing the LDS controller
+directly (not reachable from the `ava` side — `P7` is internal nanomsg IPC on
+127.0.0.1, and ttyS3 is the only LDS serial). Practically: treat the W10 LDS as a
+fixed ~126 deg (225-352 deg) sector scanner.
 
 ## Framing [verified]
 
@@ -117,14 +152,16 @@ It updates about every 3 packets. Raw units are unknown (not converted to RPM).
 
 ## Open items
 
-- Understand **why only a ~126 deg arc** is exposed on ttyS3 and whether the full
-  360 deg circle is available elsewhere (a second serial device, a different
-  `ava` node, or an internal-only path). Ruled out: active navigation — it does
-  not widen the arc (see Coverage above).
+- The **hardware reason** the LDS emits only ~126 deg (vs. the full circle its
+  pillar calibration implies) is unresolved. `ava` configuration is ruled out (see
+  "Why only ~126 deg" — `ava` never writes to the LDS, even across a reboot); what
+  remains needs LDS-vendor info or probing the LDS controller directly.
 - Confirm the `65536 == 360 deg` angle scale. It could not be pinned down because
   a full circle was never observed on this link; it is consistent with the
   observed spin rate but remains an assumption.
 - Identify the `checksum` scheme (offset 34) and the `aux` field (offset 38).
 - Convert `speed` (offset 4) to RPM.
-- Feed decoded scans into the SangamIO `dreame_w10` driver's reserved LDS group
-  (relay `lds-rx`, port 7702).
+
+*Done:* the SangamIO `dreame_w10` driver consumes `lds-rx` (port 7702) and
+publishes each arc sweep as a `lidar` `PointCloud2D` group — see the driver on the
+`dreame_w10` branch and its module docs.
