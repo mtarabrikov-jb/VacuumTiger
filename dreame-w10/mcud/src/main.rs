@@ -50,6 +50,9 @@ struct Shared {
     // safety
     hazard: AtomicBool,
     shutdown: AtomicBool,
+    // lidar: when on, the periodic frames carry ava's nav values (keeps the
+    // turret spinning) instead of the idle ones.
+    lidar_on: AtomicBool,
     // diagnostics
     overrides: AtomicU64,
     pongs: AtomicU64,
@@ -166,7 +169,10 @@ fn tx_loop(w: Arc<Mutex<File>>, sh: Arc<Shared>) {
             }
             sh.overrides.fetch_add(1, Ordering::Relaxed);
         }
-        // Periodic frames replicating ava's steady-state mix (staggered).
+        // Periodic frames replicating ava's steady-state mix (staggered). With
+        // the lidar on, 0x14/0x26 carry ava's nav values (and 0x1d re-pulses) so
+        // the turret keeps spinning; otherwise the idle values.
+        let lidar = sh.lidar_on.load(Ordering::Relaxed);
         if tick % 25 == 5 {
             send(&w, 0x02, &[0x21]); // SetLED / heartbeat, ~2 Hz
         }
@@ -174,10 +180,18 @@ fn tx_loop(w: Arc<Mutex<File>>, sh: Arc<Shared>) {
             send(&w, 0x01, &[0x00, 0x01, 0x00, 0x00, 0x00, 0x00]); // SetCleaning idle
         }
         if tick % 50 == 20 {
-            send(&w, 0x14, &[0x04, 0x00]);
+            send(&w, 0x14, if lidar { &[0x04, 0x01] } else { &[0x04, 0x00] });
         }
         if tick % 50 == 30 {
-            send(&w, 0x26, &[0x64, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04]);
+            let p: &[u8] = if lidar {
+                &[0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04]
+            } else {
+                &[0x64, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04]
+            };
+            send(&w, 0x26, p);
+        }
+        if lidar && tick % 200 == 40 {
+            send(&w, 0x1d, &[0x05, 0x01]); // laser enable re-pulse, ~every 4 s
         }
         tick = tick.wrapping_add(1);
         thread::sleep(Duration::from_millis(20)); // ~50 Hz
@@ -251,6 +265,12 @@ fn control_loop(sh: Arc<Shared>, w: Arc<Mutex<File>>) {
                 }
                 continue;
             }
+            if first == "lidar" {
+                let on = it.next().map(|s| s != "0").unwrap_or(false);
+                sh.lidar_on.store(on, Ordering::Relaxed);
+                eprintln!("mcud: lidar {}", if on { "on" } else { "off" });
+                continue;
+            }
             // drive: "<linear> <rot>"
             let lin = first.parse::<f32>().ok();
             let rot = it.next().and_then(|s| s.parse::<f32>().ok());
@@ -316,6 +336,7 @@ fn main() {
         last_cmd_ms: AtomicU64::new(0),
         hazard: AtomicBool::new(false),
         shutdown: AtomicBool::new(false),
+        lidar_on: AtomicBool::new(false),
         overrides: AtomicU64::new(0),
         pongs: AtomicU64::new(0),
         telem: Mutex::new(Vec::new()),
