@@ -659,13 +659,14 @@ pub fn encode_motor_ctrl(flag: u8, linear: f32, rotational: f32, out: &mut [u8])
     encode_frame(TX_MOTOR_CTRL, &p, out)
 }
 
-/// `0x01` SetCleaning: **6** actuator-level bytes (verified live on the W10 by
-/// watching `ava`'s TX). Observed active frames: vacuuming `55 6e 96 00 03 00`
-/// (fan/brush levels in `[0..3]`, `[4]` = a mode) and mopping `01 01 00 d6 00 00`
-/// — so **`[3]` = water/pump level** (0 without water, `0xd6` while mopping) and
-/// `[0]/[1]/[2]` are the fan/brush levels. Per-level scaling (low/med/high) is not
-/// pinned down: `ava` re-sends this only at clean start, not on a mid-clean preset
-/// change. It is not emitted at all while idle.
+/// `0x01` SetCleaning: **6** actuator-level bytes. **Fully mapped by driving each
+/// actuator directly (path 3, `mcud`) and watching the decoded currents / fan
+/// sound:** `[0]` = side-brush, `[1]` = main-brush (roller), `[2]` = fan, `[3]` =
+/// water pump, `[4]` = mode (`03` vacuum, `00` mop, `01` nav), `[5]` = 0. Evidence:
+/// byte 0 raised `sidebrush_current@28`, byte 1 raised `roller_current@26`, byte 2
+/// spun the fan (audible), byte 3 the pump (needs mop pads). `ava`'s vacuuming
+/// frame is `55 6e 96 00 03 00` = side 85, main 110, fan 150, mode 3. Not emitted
+/// while idle.
 pub fn encode_set_cleaning(f: [u8; 6], out: &mut [u8]) -> Option<usize> {
     encode_frame(TX_SET_CLEANING, &f, out)
 }
