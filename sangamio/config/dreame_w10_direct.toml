@@ -1,0 +1,16 @@
+# Dreame Bot W10 (r2104) — DIRECT mode: SangamIO replaces `ava` and drives the
+# MCU itself. Run ON the robot with ava stopped (see ../dreame-w10/mcud.sh for the
+# ava stop/restore dance; run `sangamio --config dreame_w10_direct.toml` in place
+# of w10-mcud). Commands (drive/vacuum/main_brush/side_brush/water_pump/lidar) now
+# actuate the robot.
+[device]
+type = "dreame_w10"
+name = "Dreame Bot W10 (direct)"
+
+[device.hardware]
+gd32_port = "/dev/ttyS4"     # MCU serial -> direct mode (a /dev path, not host:port)
+lidar_port = "/dev/ttyS3"    # LDS serial
+heartbeat_interval_ms = 20   # unused (fixed 50 Hz MotorCtrl)
+
+[network]
+bind_address = "0.0.0.0:5555"
