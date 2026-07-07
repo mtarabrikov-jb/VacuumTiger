@@ -80,6 +80,10 @@ arm-linux-gnueabihf-strip \
 | (default) | Real hardware support only |
 | `mock` | Enable mock device simulation |
 
+### Dreame Bot W10 (aarch64)
+
+The W10 (`device.type = "dreame_w10"`) is aarch64 with an old glibc, so it needs a static musl build via Docker (`build/build-aarch64.sh`) rather than the armv7 flow above. It also supports two modes (read-only over the stock `ava` daemon, or full direct control). See [docs/dreame_w10.md](docs/dreame_w10.md) for build, deploy, test client, and restore.
+
 ## Deployment
 
 **SSH**: `root@vacuum` (see project docs for credentials)
