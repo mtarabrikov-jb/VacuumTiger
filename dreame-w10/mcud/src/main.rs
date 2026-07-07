@@ -8,9 +8,10 @@
 //! from a control client (text over TCP 7705, same protocol as `avatap-relay`)
 //! and is gated by a command watchdog, a speed clamp and a live cliff/bumper
 //! hazard read from the MCU's own Triggers stream. Raw telemetry is re-served on
-//! 7701 so `w10-decode` still works.
+//! 7701 (MCU, ttyS4) and 7702 (LDS, ttyS3) so `w10-decode` still works. The LDS
+//! turret is silent until enabled via the ttyS4 lidar command.
 //!
-//! v1 scope: teleop only — no LDS/SLAM, docking or charging logic (the dock
+//! v1 scope: teleop + actuator probing — no SLAM, docking or charging logic (the dock
 //! hardware handles charging). Start/stop it with the `mcud.sh` wrapper, which
 //! stops `ava` (and its respawn) first and restores it afterward.
 
@@ -25,9 +26,11 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const TTY: &str = "/dev/ttyS4";
+const TTY_MCU: &str = "/dev/ttyS4";
+const TTY_LDS: &str = "/dev/ttyS3";
 const CONTROL_PORT: u16 = 7705;
-const TELEM_PORT: u16 = 7701;
+const TELEM_MCU_PORT: u16 = 7701;
+const TELEM_LDS_PORT: u16 = 7702;
 
 const MAX_LINEAR_MM_S: f32 = 150.0;
 const MAX_ROT_RAD_S: f32 = 1.5;
@@ -50,8 +53,9 @@ struct Shared {
     // diagnostics
     overrides: AtomicU64,
     pongs: AtomicU64,
-    // raw-telemetry mirror clients
+    // raw-telemetry mirror clients (MCU ttyS4, LDS ttyS3)
     telem: Mutex<Vec<TcpStream>>,
+    telem_lds: Mutex<Vec<TcpStream>>,
 }
 
 impl Shared {
@@ -64,13 +68,13 @@ fn clampf(v: f32, lo: f32, hi: f32) -> f32 {
     v.max(lo).min(hi)
 }
 
-/// Open the MCU serial port in raw mode at 115200 8N1.
-fn open_serial() -> std::io::Result<File> {
+/// Open a serial port in raw mode at `baud` 8N1.
+fn open_serial(path: &str, baud: libc::speed_t) -> std::io::Result<File> {
     let f = OpenOptions::new()
         .read(true)
         .write(true)
         .custom_flags(libc::O_NOCTTY)
-        .open(TTY)?;
+        .open(path)?;
     let fd = f.as_raw_fd();
     unsafe {
         let mut t: libc::termios = std::mem::zeroed();
@@ -78,8 +82,8 @@ fn open_serial() -> std::io::Result<File> {
             return Err(std::io::Error::last_os_error());
         }
         libc::cfmakeraw(&mut t);
-        libc::cfsetispeed(&mut t, libc::B115200);
-        libc::cfsetospeed(&mut t, libc::B115200);
+        libc::cfsetispeed(&mut t, baud);
+        libc::cfsetospeed(&mut t, baud);
         t.c_cflag |= libc::CLOCAL | libc::CREAD;
         t.c_cc[libc::VMIN] = 0;
         t.c_cc[libc::VTIME] = 1; // 0.1 s read timeout so the reader can exit
@@ -264,20 +268,40 @@ fn control_loop(sh: Arc<Shared>, w: Arc<Mutex<File>>) {
     }
 }
 
-/// Telemetry server: hand each client the raw MCU byte stream.
-fn telem_loop(sh: Arc<Shared>) {
-    let l = match TcpListener::bind(("0.0.0.0", TELEM_PORT)) {
+/// LDS read: forward the raw ttyS3 scan stream to lds-rx clients. The LDS is
+/// read-only (the turret spins only once enabled via the ttyS4 lidar command).
+fn lds_rx_loop(mut rd: File, sh: Arc<Shared>) {
+    let mut buf = [0u8; 4096];
+    while !sh.shutdown.load(Ordering::Relaxed) {
+        let n = match rd.read(&mut buf) {
+            Ok(0) => continue,
+            Ok(n) => n,
+            Err(_) => {
+                thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+        };
+        if let Ok(mut cs) = sh.telem_lds.lock() {
+            cs.retain_mut(|c| c.write_all(&buf[..n]).is_ok());
+        }
+    }
+}
+
+/// Telemetry server: hand each client the raw byte stream of one channel.
+fn telem_loop(sh: Arc<Shared>, port: u16, lds: bool) {
+    let l = match TcpListener::bind(("0.0.0.0", port)) {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("mcud: cannot bind telem {}: {}", TELEM_PORT, e);
+            eprintln!("mcud: cannot bind telem {}: {}", port, e);
             return;
         }
     };
-    eprintln!("mcud: telemetry on 0.0.0.0:{}", TELEM_PORT);
+    eprintln!("mcud: {} on 0.0.0.0:{}", if lds { "lds-rx" } else { "mcu-rx" }, port);
     for stream in l.incoming() {
         let Ok(s) = stream else { continue };
         let _ = s.set_nodelay(true);
-        if let Ok(mut cs) = sh.telem.lock() {
+        let v = if lds { &sh.telem_lds } else { &sh.telem };
+        if let Ok(mut cs) = v.lock() {
             cs.push(s);
         }
     }
@@ -295,12 +319,13 @@ fn main() {
         overrides: AtomicU64::new(0),
         pongs: AtomicU64::new(0),
         telem: Mutex::new(Vec::new()),
+        telem_lds: Mutex::new(Vec::new()),
     });
 
-    let rd = match open_serial() {
+    let rd = match open_serial(TTY_MCU, libc::B115200) {
         Ok(f) => f,
         Err(e) => {
-            eprintln!("mcud: cannot open {} ({}) — is ava stopped?", TTY, e);
+            eprintln!("mcud: cannot open {} ({}) — is ava stopped?", TTY_MCU, e);
             std::process::exit(1);
         }
     };
@@ -312,7 +337,20 @@ fn main() {
         }
     };
     let w = Arc::new(Mutex::new(wr));
-    eprintln!("mcud: driving MCU on {} (MotorCtrl 50Hz + pong + heartbeats)", TTY);
+    eprintln!("mcud: driving MCU on {} (MotorCtrl 50Hz + pong + heartbeats)", TTY_MCU);
+
+    // LDS is optional: open it read-only-ish and forward its scan stream. The
+    // turret is silent until enabled via the ttyS4 lidar command.
+    let lds_rd = match open_serial(TTY_LDS, libc::B230400) {
+        Ok(f) => {
+            eprintln!("mcud: LDS on {} (forwarding to lds-rx)", TTY_LDS);
+            Some(f)
+        }
+        Err(e) => {
+            eprintln!("mcud: WARN cannot open {} ({}) — LDS disabled", TTY_LDS, e);
+            None
+        }
+    };
 
     let mut hs = Vec::new();
     {
@@ -327,9 +365,17 @@ fn main() {
         let (sh, w) = (sh.clone(), w.clone());
         hs.push(thread::spawn(move || control_loop(sh, w)));
     }
+    if let Some(lds_rd) = lds_rd {
+        let sh = sh.clone();
+        hs.push(thread::spawn(move || lds_rx_loop(lds_rd, sh)));
+    }
     {
         let sh = sh.clone();
-        hs.push(thread::spawn(move || telem_loop(sh)));
+        hs.push(thread::spawn(move || telem_loop(sh, TELEM_MCU_PORT, false)));
+    }
+    {
+        let sh = sh.clone();
+        hs.push(thread::spawn(move || telem_loop(sh, TELEM_LDS_PORT, true)));
     }
     for h in hs {
         let _ = h.join();
