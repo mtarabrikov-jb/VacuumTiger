@@ -136,13 +136,14 @@ reaction is on the MCU itself). Live A-B on the W10 this session:
 
 - **bit 4 = left bumper, bit 5 = right bumper** — pressing each set `raw[0]` to
   `0x10` / `0x20`.
-- **bit 6 = left, bit 7 = right wheel float** — both set (`raw[0]=0xc0`) when the
-  robot is lifted.
-- **`raw[1]` = six downward sensors (bits 8-13)** — `0x00` on the floor, `0x3f`
-  when lifted (no floor under any). Covering each cliff sensor in turn mapped the
-  four cliffs: **bit 8 = front-left, bit 11 = front-right, bit 12 = rear-left,
-  bit 13 = rear-right**. Bits 9 and 10 did not respond to the cliff positions and
-  are **likely the left/right wheel sensors** (per the owner) — not isolated yet.
+- **bit 6 = left wheel, bit 7 = right wheel** (drop/float) — both set
+  (`raw[0]=0xc0`) when lifted; **[verified L/R]** by pushing each drive wheel into
+  the body: bit 6 cleared for the left wheel, bit 7 for the right.
+- **`raw[1]` = six downward floor sensors (bits 8-13)** — `0x00` on the floor,
+  `0x3f` when lifted (no floor under any). Covering each cliff sensor in turn
+  mapped the four cliffs: **bit 8 = front-left, bit 11 = front-right, bit 12 =
+  rear-left, bit 13 = rear-right**. Bits 9 and 10 are two more floor sensors,
+  positions not isolated (they are **not** the wheels — those are bits 6/7 above).
 - **bit 32 = `dock_sta`** — 1 docked, clears when lifted off.
 - **Caveat:** bits 16-18 read `0b111` both docked AND lifted, so they are **not**
   dock-presence IR — the Z10 `ir_dock*` decode in `proto` is suspect on the W10.
