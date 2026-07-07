@@ -186,8 +186,28 @@ fn tx_loop(w: Arc<Mutex<File>>, sh: Arc<Shared>) {
     }
 }
 
+/// Parse `"aa bb cc"` / `"aabbcc"` hex into bytes.
+fn parse_hex(it: std::str::SplitWhitespace) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    for tok in it {
+        let t = tok.trim_start_matches("0x");
+        if t.len() == 2 {
+            out.push(u8::from_str_radix(t, 16).ok()?);
+        } else if t.len() % 2 == 0 {
+            for i in (0..t.len()).step_by(2) {
+                out.push(u8::from_str_radix(&t[i..i + 2], 16).ok()?);
+            }
+        } else {
+            return None;
+        }
+    }
+    Some(out)
+}
+
 /// Control server: one drive client at a time (text lines, same as avatap-relay).
-fn control_loop(sh: Arc<Shared>) {
+/// Also accepts `"frame <type_hex> <payload_hex...>"` to send one arbitrary frame
+/// (actuator probing / control — e.g. SetCleaning or the lidar enable).
+fn control_loop(sh: Arc<Shared>, w: Arc<Mutex<File>>) {
     let l = match TcpListener::bind(("0.0.0.0", CONTROL_PORT)) {
         Ok(l) => l,
         Err(e) => {
@@ -213,7 +233,22 @@ fn control_loop(sh: Arc<Shared>) {
                 continue;
             }
             let mut it = t.split_whitespace();
-            let lin = it.next().and_then(|s| s.parse::<f32>().ok());
+            let first = it.next().unwrap_or("");
+            if first == "frame" {
+                let typ = it
+                    .next()
+                    .and_then(|s| u8::from_str_radix(s.trim_start_matches("0x"), 16).ok());
+                match (typ, parse_hex(it)) {
+                    (Some(typ), Some(p)) => {
+                        send(&w, typ, &p);
+                        eprintln!("mcud: sent frame 0x{:02x} ({} bytes)", typ, p.len());
+                    }
+                    _ => eprintln!("mcud: bad frame line {:?}", t),
+                }
+                continue;
+            }
+            // drive: "<linear> <rot>"
+            let lin = first.parse::<f32>().ok();
             let rot = it.next().and_then(|s| s.parse::<f32>().ok());
             if let (Some(l), Some(r)) = (lin, rot) {
                 if l.is_finite() && r.is_finite() {
@@ -289,8 +324,8 @@ fn main() {
         hs.push(thread::spawn(move || tx_loop(w, sh)));
     }
     {
-        let sh = sh.clone();
-        hs.push(thread::spawn(move || control_loop(sh)));
+        let (sh, w) = (sh.clone(), w.clone());
+        hs.push(thread::spawn(move || control_loop(sh, w)));
     }
     {
         let sh = sh.clone();
