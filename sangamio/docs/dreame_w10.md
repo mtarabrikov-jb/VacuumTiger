@@ -69,6 +69,30 @@ Note: `led` is sent as a fixed heartbeat only (`0x02 21`); it is not a client-co
 
 Direct mode was validated on the physical robot on 2026-07-07: with `ava` stopped, SangamIO held the MCU healthy (no com-fault), and every command actuated correctly - lidar turret, side brush, main brush (roller), vacuum fan, and a forward drive pulse (~5cm, auto-stopped by the 500ms watchdog). No protobuf parse or serial errors. Behavior is identical to the `w10-mcud` standalone driver (`../dreame-w10`), whose MCU/LDS protocol this driver reuses via `dreame-w10-proto`.
 
+## Lidar and SLAM (dhruva-slam)
+
+The `lidar` sensor group publishes `scan` as a `PointCloud2D` of `(angle_rad, distance_m, quality)`, robot-centered: each raw LDS angle goes through `frame_transforms.lidar` (`AffineTransform1D`) then `lidar_mounting.transform_to_robot_center`, the same pipeline as the Revo LDS driver that dhruva-slam already consumes. **Coverage is a fixed ~126 deg rear arc** (raw 225-352 deg), not a full circle - dhruva-slam accepts partial scans (min 50 points), but scan-matching is weaker than a 360 deg lidar.
+
+Inspect the raw scan with the receiver tool (registers over TCP, decodes the UDP `scan`, prints a 30-degree coverage histogram):
+
+```
+tools/lidar_rx.py <robot-ip> [seconds]
+```
+
+Run the SLAM consumer (dhruva-slam) against the robot. The SangamIO address is set in the config file's `[source] sangam_address` (there is no `--sangam` flag); copy `dhruva-slam.toml`, point it at the robot, and give it a writable `[map_storage] path`:
+
+```
+sed -e 's#sangam_address = "localhost:5555"#sangam_address = "<robot-ip>:5555"#' \
+    dhruva-slam.toml > dhruva-robot.toml
+dhruva-slam -c dhruva-robot.toml
+```
+
+Validated end-to-end 2026-07-07: with SangamIO in direct mode and `lidar on`, dhruva-slam connects, streams UDP, and logs `Lidar scan received: ~270 points` at ~5 Hz (plus wheel odometry from `sensor_status`); no crashes.
+
+### Calibration (pending)
+
+The `frame_transforms.lidar` (`scale`/`offset`) and `lidar_mounting.angle_offset` values in `dreame_w10*.toml` are **uncalibrated starting guesses** (`scale=-1`, `offset=0`, `angle_offset=0.4204`/theta 24.09 from the robot's `/mnt/misc/lds_config.json`). To calibrate: place the robot with a flat wall at a known distance/direction inside the ~126 deg arc, capture with `lidar_rx.py`, and adjust `scale`/`offset`/`angle_offset` (TOML only, no rebuild) until the wall lands at the correct ROS angle (0 = forward, CCW positive). `offset_x=-0.087` (LDS behind center) is already from `lds_config.json`.
+
 ## Protocol references
 
 - MCU framing, SetCleaning actuator map, ping/pong, triggers: `../dreame-w10/docs/MCU_PROTOCOL.md`
