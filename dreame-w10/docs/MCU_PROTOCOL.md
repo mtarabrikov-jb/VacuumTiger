@@ -128,13 +128,26 @@ mop/tank state (exact bits still to be split — pull the water tank to map them
 Pitch/roll are also available from the 0x02 accelerometer gravity
 vector.
 
-### 0x00 Triggers — bit flags [verified]
+### 0x00 Triggers — bit flags [verified live]
 
-7-byte bitfield; each global bit `k` = `(raw[k/8] >> (k%8)) & 1`. Decodes
-correctly on the W10: docked → `dock_sta=true`, all bumpers/wheel-float false, no
-error bits, `ir_dock_lf=7`. Fields (bumpers, wheel floating, dock IR, LDS
-buttons, and every fault flag: side/roll/pump/fan overcurrent, wheel
-overcurrent, lidar/vel/imu/charge errors) per [`proto`](../proto/src/lib.rs).
+7-byte bitfield, **~10 Hz**; global bit `k` = `(raw[k/8] >> (k%8)) & 1`. Bumper,
+cliff and lift are therefore all polled together at 10 Hz (the immediate safety
+reaction is on the MCU itself). Live A-B on the W10 this session:
+
+- **bit 4 = left bumper, bit 5 = right bumper** — pressing each set `raw[0]` to
+  `0x10` / `0x20`.
+- **bit 6 = left, bit 7 = right wheel float** — both set (`raw[0]=0xc0`) when the
+  robot is lifted.
+- **`raw[1]` (bits 8-15) = cliff / floor sensors** — `0x00` on the floor; bits
+  9-11 fire when the robot is lifted (no floor under the downward sensors). The
+  per-sensor bit→position map is not split yet.
+- **bit 32 = `dock_sta`** — 1 docked, clears when lifted off.
+- **Caveat:** bits 16-18 read `0b111` both docked AND lifted, so they are **not**
+  dock-presence IR — the Z10 `ir_dock*` decode in `proto` is suspect on the W10.
+
+Rest on dock = `00 00 07 00 01 00 00`. Fault flags (overcurrents, lidar/vel/imu/
+charge errors) are per [`proto`](../proto/src/lib.rs), from the Z10 analogy
+(not individually W10-verified).
 
 ### 0x2b BatteryStatus [verified]
 
