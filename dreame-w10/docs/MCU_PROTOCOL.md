@@ -169,12 +169,13 @@ Z10 reference, not yet observed. Encoders are in [`proto`](../proto/src/lib.rs):
 | type | name | payload | notes |
 |------|------|---------|-------|
 | 0x00 | MotorCtrl | `<B f f>` = flag, linear, rotational | **[verified]** flag=1; linear **mm/s**, rotational **rad/s** (neg = CW); ~50 Hz keepalive at 0 when idle |
-| 0x01 | SetCleaning | **6 bytes** | **[verified live]** actuator levels. Idle `00 01 00 00 00 00`; vacuuming `55 6e 96 00 03 00` (fan/brush in `[0..3]`, `[4]`=mode); mopping `01 01 00 d6 00 00` → **`[3]` = water/pump level** (0 without water, `0xd6` mopping). Per-level scaling (low/med/high) unresolved — `ava` re-sends only at clean start, not on a mid-clean preset change |
+| 0x01 | SetCleaning | **6 bytes** | **[verified live — fully mapped]** by driving each actuator under `mcud` (path 3) and watching currents / fan sound: **`[0]`=side-brush, `[1]`=main-brush (roller), `[2]`=fan, `[3]`=water pump, `[4]`=mode** (`03` vacuum / `00` mop / `01` nav). byte 0→`sidebrush_current@28`, byte 1→`roller_current@26`, byte 2→fan (audible), byte 3→pump. Vacuuming `55 6e 96 00 03 00` = side 85 / main 110 / fan 150 / mode 3 |
 | 0x02 | SetButtonLED | `<B>` | **[verified live]** LED-state enum: `0x21` idle, `0x02` after Locate, `0x04` during mop-dock clean; also the MCU heartbeat |
 | 0x0f | Pong | 4 bytes | **[verified live]** `ava`'s reply to the MCU `0x0f` ping (echoes the ping payload) |
-| 0x14 | ? (sound/LED) | `<B B>` | **[observed]** rapid `01 01`/`00 01` toggles during Locate; idle `04 00`, mop-clean `04 01` |
-| 0x1d | Laser/ToF control? | `<B B>` | **[observed]** one-shot `05 01` right after Locate |
-| 0x26 | ? status/level | 8 bytes | **[observed]** `[0]` = level (idle `0x64`=100, drops to 8-18 under activity), `[7]`=`0x04` const |
+| 0x14 | nav/lidar flag | `<B B>` | **[verified]** `[1]`=1 keeps the LDS turret spinning; **`04 00` (idle) halts it**. Sent continuously in nav |
+| 0x1d | Laser/ToF enable | `<B B>` | **[verified]** `05 01` re-pulse (~every 4 s in nav) — part of keeping the lidar on |
+| 0x26 | nav/lidar status | 8 bytes | **[verified]** `[0]`=`0x64` idle → `0x14` in nav (lidar on); `[7]`=`0x04` const |
+| — | **lidar on** | — | **[verified under mcud]** stream `0x14 04 01` + `0x26 14 ..` continuously + `0x1d 05 01` re-pulse → turret spins (~220 pkt/s on ttyS3); revert to idle `0x14 04 00` → stops |
 | 0x04 | SetOdometer | `<B I I I b>` | Z10 ref, not observed |
 | 0x11 | SetLDSCalibration | `<f f f>` | Z10 ref, not observed |
 | 0x1f | CalibrateIMU | `<B>` | Z10 ref, not observed |
