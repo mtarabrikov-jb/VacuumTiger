@@ -24,12 +24,13 @@
 //!   `is_charging` (Bool)
 //!
 //! # Sensor group `lidar`
-//! - `scan`: `PointCloud2D` of `(angle_rad, distance_m, quality)` from the LDS
-//!   relay (`lds-rx`), one arc sweep per publish. **Caveat:** the tapped ttyS3
-//!   feed is a fixed ~126 deg rear arc (~226-352 deg), not a full circle, and the
-//!   angle is the raw sensor angle (frame/orientation vs. robot-forward is not
-//!   yet calibrated — no mounting transform is applied). See
-//!   `../dreame-w10/docs/LDS_PROTOCOL.md`.
+//! - `scan`: `PointCloud2D` of `(angle_rad, distance_m, quality)`, robot-centered
+//!   (each raw sensor angle goes through `frame_transforms.lidar` then
+//!   `lidar_mounting.transform_to_robot_center`, same as the Revo/Delta drivers),
+//!   one arc sweep per publish. **Caveats:** the ttyS3 feed is a fixed ~126 deg
+//!   rear arc (~226-352 deg), not a full circle; and the transform values in
+//!   `dreame_w10*.toml` are uncalibrated starting guesses (calibrate on-robot).
+//!   See `../dreame-w10/docs/LDS_PROTOCOL.md`.
 //! - `speed_raw`: `U16` turret speed (raw units, not RPM).
 //!
 //! # Config
@@ -45,7 +46,7 @@
 //! **Over-ava mode:** read-only — commands are logged and ignored (`ava` owns the
 //! motors; teleop via Valetudo).
 
-use crate::config::DeviceConfig;
+use crate::config::{AffineTransform1D, DeviceConfig, LidarMountingConfig};
 use crate::core::driver::{DeviceDriver, DriverInitResult};
 use crate::core::types::{
     Command, ComponentAction, SensorGroupData, SensorValue, StreamSender, create_stream_channel,
@@ -125,6 +126,11 @@ impl DeviceDriver for DreameW10Driver {
         let mcu_addr = std::env::var("W10_MCU_ADDR").unwrap_or_else(|_| hardware.gd32_port.clone());
         let lds_addr = std::env::var("W10_LDS_ADDR").unwrap_or_else(|_| hardware.lidar_port.clone());
         let direct = mcu_addr.starts_with("/dev/");
+        // Lidar frame -> robot frame, applied per point before publishing `scan`
+        // (same as the Revo/Delta drivers, so dhruva-slam gets robot-centered
+        // scans). Values come from the config; see dreame_w10*.toml.
+        let lidar_tf = hardware.frame_transforms.lidar;
+        let lidar_mount = hardware.lidar_mounting.clone();
 
         let mut sensor_data = HashMap::new();
         let mut stream_receivers = HashMap::new();
@@ -173,7 +179,7 @@ impl DeviceDriver for DreameW10Driver {
                     self.lds_reader = Some(
                         thread::Builder::new()
                             .name("w10-lds-rx".to_string())
-                            .spawn(move || serial_lds_loop(lds_rd, lg, ls))
+                            .spawn(move || serial_lds_loop(lds_rd, lg, ls, lidar_tf, lidar_mount))
                             .map_err(|e| Error::Config(format!("spawn lds: {e}")))?,
                     );
                 }
@@ -192,7 +198,7 @@ impl DeviceDriver for DreameW10Driver {
             self.lds_reader = Some(
                 thread::Builder::new()
                     .name("w10-lds-reader".to_string())
-                    .spawn(move || lds_reader_loop(lds_addr, lidar, lds_shutdown))
+                    .spawn(move || lds_reader_loop(lds_addr, lidar, lds_shutdown, lidar_tf, lidar_mount))
                     .map_err(|e| Error::Config(format!("failed to spawn lds reader: {e}")))?,
             );
         }
@@ -433,7 +439,13 @@ fn serial_tx_loop(
 
 /// Read the LDS serial stream and publish arc sweeps to the `lidar` group
 /// (same accumulate/publish logic as the over-ava reader).
-fn serial_lds_loop(mut rd: Port, group: Arc<Mutex<SensorGroupData>>, shutdown: Arc<AtomicBool>) {
+fn serial_lds_loop(
+    mut rd: Port,
+    group: Arc<Mutex<SensorGroupData>>,
+    shutdown: Arc<AtomicBool>,
+    tf: AffineTransform1D,
+    mount: LidarMountingConfig,
+) {
     use std::f32::consts::TAU;
     const MIN_POINTS: usize = 16;
     const SWEEP_RESET: u16 = 4000;
@@ -474,8 +486,10 @@ fn serial_lds_loop(mut rd: Port, group: Arc<Mutex<SensorGroupData>>, shutdown: A
                 if !s.valid {
                     continue;
                 }
-                let angle = f.sample_angle(k) as f32 / 65536.0 * TAU;
-                points.push((angle, s.dist_mm as f32 / 1000.0, s.quality.max(1)));
+                let raw = f.sample_angle(k) as f32 / 65536.0 * TAU;
+                let (angle, dist_m) =
+                    mount.transform_to_robot_center(tf.apply(raw), s.dist_mm as f32 / 1000.0);
+                points.push((angle, dist_m, s.quality.max(1)));
             }
             last_fsa = Some(f.fsa);
             if sweep_start.elapsed() > MAX_SWEEP && points.len() >= MIN_POINTS {
@@ -602,7 +616,13 @@ fn apply(d: &mut SensorGroupData, m: &Msg) -> bool {
 /// feed is a fixed ~126 deg rear arc, so a "sweep" is one pass of that arc: `fsa`
 /// climbs, then jumps back down to the arc start — that reset is the publish
 /// boundary. Reconnects on any error so it survives relay/ava restarts.
-fn lds_reader_loop(addr: String, group: Arc<Mutex<SensorGroupData>>, shutdown: Arc<AtomicBool>) {
+fn lds_reader_loop(
+    addr: String,
+    group: Arc<Mutex<SensorGroupData>>,
+    shutdown: Arc<AtomicBool>,
+    tf: AffineTransform1D,
+    mount: LidarMountingConfig,
+) {
     use std::f32::consts::TAU;
     /// Minimum valid points before a sweep is worth publishing.
     const MIN_POINTS: usize = 16;
@@ -668,8 +688,9 @@ fn lds_reader_loop(addr: String, group: Arc<Mutex<SensorGroupData>>, shutdown: A
                     if !s.valid {
                         continue;
                     }
-                    let angle = f.sample_angle(k) as f32 / 65536.0 * TAU;
-                    let dist_m = s.dist_mm as f32 / 1000.0;
+                    let raw = f.sample_angle(k) as f32 / 65536.0 * TAU;
+                    let (angle, dist_m) =
+                        mount.transform_to_robot_center(tf.apply(raw), s.dist_mm as f32 / 1000.0);
                     points.push((angle, dist_m, s.quality.max(1)));
                 }
                 last_fsa = Some(f.fsa);

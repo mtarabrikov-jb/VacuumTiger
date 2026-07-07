@@ -19,5 +19,18 @@ lidar_port = "127.0.0.1:7702"   # avatap-relay lds-rx (reserved; LDS not decoded
 # Required by the shared HardwareConfig but unused for this device:
 heartbeat_interval_ms = 20
 
+# Lidar frame -> robot frame, applied per point before publishing `scan` (same as
+# direct mode). Shared defaults are CRL-200S values (wrong for the W10). These are
+# UNCALIBRATED starting guesses -- calibrate on-robot (see dreame_w10_direct.toml).
+[device.hardware.frame_transforms.lidar]
+scale = -1.0    # CALIBRATE
+offset = 0.0    # CALIBRATE
+
+[device.hardware.lidar_mounting]
+offset_x = -0.087      # from robot /mnt/misc/lds_config.json
+offset_y = 0.0
+optical_offset = 0.0
+angle_offset = 0.4204  # theta 24.09 deg (lds_config.json). CALIBRATE.
+
 [network]
 bind_address = "0.0.0.0:5555"

@@ -12,5 +12,20 @@ gd32_port = "/dev/ttyS4"     # MCU serial -> direct mode (a /dev path, not host:
 lidar_port = "/dev/ttyS3"    # LDS serial
 heartbeat_interval_ms = 20   # unused (fixed 50 Hz MotorCtrl)
 
+# Lidar frame -> robot frame (0=forward, CCW), applied per point before the
+# driver publishes `scan`. Without these sections the shared defaults are
+# CRL-200S values, which are wrong for the W10 -- set them explicitly.
+# UNCALIBRATED starting guesses: point the robot's known forward at a flat wall,
+# capture a scan, and adjust until the ~126 deg arc lands on the wall.
+[device.hardware.frame_transforms.lidar]
+scale = -1.0    # guess: LDS spins CW; -1 maps to ROS CCW. CALIBRATE.
+offset = 0.0    # rotate raw-zero to robot forward. CALIBRATE.
+
+[device.hardware.lidar_mounting]
+offset_x = -0.087      # LDS behind robot center (m), from robot /mnt/misc/lds_config.json
+offset_y = 0.0
+optical_offset = 0.0   # unknown for the W10; 0 until measured
+angle_offset = 0.4204  # theta 24.09 deg (lds_config.json). CALIBRATE sign/value.
+
 [network]
 bind_address = "0.0.0.0:5555"
