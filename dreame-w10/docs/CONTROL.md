@@ -65,8 +65,10 @@ ava write(ttyS4, MotorCtrl) --> avatap intercept --reads shm.Control-->
 
 ```sh
 make docker && make upload && make inject   # deploy tap+relay (restarts ava)
-# drive: linear mm/s, rot rad/s, seconds (10 Hz keepalive, then stop)
+# scripted drive: linear mm/s, rot rad/s, seconds (10 Hz keepalive, then stop)
 python3 drive.py <robot-ip> 30 0 1.5
+# interactive keyboard teleop (WASD/arrows, hold-to-move dead-man, space=stop)
+python3 teleop.py <robot-ip>
 ```
 
 Test only on open floor away from stairs — the hazard gate covers detected
