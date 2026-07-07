@@ -34,15 +34,16 @@ docker: ## Cross-compile avatap.so + avatap-relay for the robot (aarch64) via Do
 	@cid=$$(docker create w10-bridge-build) && \
 		docker cp $$cid:/out/avatap.so out/avatap.so && \
 		docker cp $$cid:/out/avatap-relay out/avatap-relay && \
+		docker cp $$cid:/out/w10-mcud out/w10-mcud && \
 		docker rm $$cid >/dev/null
-	@echo ">> built out/avatap.so + out/avatap-relay (aarch64)"
+	@echo ">> built out/avatap.so + out/avatap-relay + out/w10-mcud (aarch64)"
 
 .PHONY: upload
 upload: ## Push out/* + inject.sh to $(REMOTE_DIR) on the robot (tar-over-ssh, no sftp)
 	@[ -f out/avatap.so ] || { echo "run 'make docker' first"; exit 1; }
 	$(SSH) 'mkdir -p $(REMOTE_DIR)'
-	tar -C out -cf - avatap.so avatap-relay | $(SSH) 'tar -C $(REMOTE_DIR) -xf -'
-	tar -cf - inject.sh | $(SSH) 'tar -C $(REMOTE_DIR) -xf - && chmod +x $(REMOTE_DIR)/inject.sh $(REMOTE_DIR)/avatap-relay'
+	tar -C out -cf - avatap.so avatap-relay w10-mcud | $(SSH) 'tar -C $(REMOTE_DIR) -xf -'
+	tar -cf - inject.sh mcud.sh | $(SSH) 'tar -C $(REMOTE_DIR) -xf - && chmod +x $(REMOTE_DIR)/inject.sh $(REMOTE_DIR)/mcud.sh $(REMOTE_DIR)/avatap-relay $(REMOTE_DIR)/w10-mcud'
 	@$(SSH) 'ls -la $(REMOTE_DIR)'
 
 .PHONY: inject
@@ -53,6 +54,23 @@ inject: ## Inject the tap into ava + start the relay (RESTARTS ava; robot idle o
 .PHONY: remove
 remove: ## Remove the tap, stop the relay, restore camera/stock ava
 	$(SSH) 'REMOTE_DIR=$(REMOTE_DIR) sh $(REMOTE_DIR)/inject.sh remove' || true
+
+.PHONY: mcud-start
+mcud-start: ## PATH 3: kill ava and drive the MCU with w10-mcud (camera/ava DOWN)
+	@echo ">> This KILLS ava (camera + Valetudo down). Robot on open floor/dock."
+	$(SSH) 'REMOTE_DIR=$(REMOTE_DIR) sh $(REMOTE_DIR)/mcud.sh start'
+
+.PHONY: mcud-restore
+mcud-restore: ## PATH 3: stop w10-mcud, bring ava + relay back
+	$(SSH) 'REMOTE_DIR=$(REMOTE_DIR) sh $(REMOTE_DIR)/mcud.sh restore'
+
+.PHONY: mcud-status
+mcud-status: ## Show ava / mcud / respawner state
+	@$(SSH) 'REMOTE_DIR=$(REMOTE_DIR) sh $(REMOTE_DIR)/mcud.sh status'
+
+.PHONY: mcud-log
+mcud-log: ## Tail the mcud log on the robot
+	@$(SSH) 'tail -n 40 /data/log/mcud.log 2>/dev/null'
 
 .PHONY: status
 status: ## Show tap + relay state on the robot

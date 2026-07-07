@@ -33,7 +33,9 @@ COPY . /src
 
 RUN cargo build --release --target aarch64-unknown-linux-gnu  -p avatap && \
     cargo build --release --target aarch64-unknown-linux-musl -p avatap-relay && \
+    cargo build --release --target aarch64-unknown-linux-musl -p w10-mcud && \
     mkdir -p /out && \
     cp target/aarch64-unknown-linux-gnu/release/libavatap.so   /out/avatap.so && \
     cp target/aarch64-unknown-linux-musl/release/avatap-relay  /out/avatap-relay && \
-    aarch64-linux-gnu-strip /out/avatap.so /out/avatap-relay
+    cp target/aarch64-unknown-linux-musl/release/w10-mcud      /out/w10-mcud && \
+    aarch64-linux-gnu-strip /out/avatap.so /out/avatap-relay /out/w10-mcud

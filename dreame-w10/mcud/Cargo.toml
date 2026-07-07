@@ -1,0 +1,14 @@
+[package]
+name = "w10-mcud"
+version = "0.1.0"
+edition = "2021"
+description = "Path 3: standalone W10 MCU driver — opens /dev/ttyS4 directly (ava replaced), sustains the protocol (MotorCtrl 50Hz + heartbeats + ping/pong) and drives the robot with its own safety loop"
+license = "MIT"
+
+[[bin]]
+name = "w10-mcud"
+path = "src/main.rs"
+
+[dependencies]
+libc = "0.2"
+dreame-w10-proto = { path = "../proto" }

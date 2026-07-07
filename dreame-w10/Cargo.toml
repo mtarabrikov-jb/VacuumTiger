@@ -7,11 +7,11 @@
 # `ava` keeps the robot safe. See README.md.
 [workspace]
 resolver = "2"
-members = ["proto", "shm", "avatap", "avatap-relay", "w10-decode"]
+members = ["proto", "shm", "avatap", "avatap-relay", "w10-decode", "mcud"]
 # avatap is a no_std cdylib that must build panic=abort; it's cross-compiled for
 # the robot in release. Exclude it from default host `cargo build`/`test` (which
 # use the dev profile's panic=unwind) — build it explicitly with -p avatap.
-default-members = ["proto", "shm", "avatap-relay", "w10-decode"]
+default-members = ["proto", "shm", "avatap-relay", "w10-decode", "mcud"]
 
 # panic=abort: the tap is a no_std cdylib injected into `ava` and must never
 # unwind across the C ABI; abort keeps the relay small too.
