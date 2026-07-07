@@ -369,8 +369,8 @@ impl Status100ms {
 /// **W10 live-verified this session:** bit 4 = left bumper, bit 5 = right bumper
 /// (pressed each); bit 6 = left / bit 7 = right wheel float (both set when the
 /// robot is lifted); **`raw[1]` = six cliff / floor sensors at bits 8-13** (fire
-/// when lifted; front L/R = bits 8/11, rear L/R = bits 12/13, bits 9/10 likely the
-/// wheel sensors — see `cliff_flags`); bit 32 = `dock_sta`
+/// when lifted; front L/R = bits 8/11, rear L/R = bits 12/13, bits 9/10 = two more
+/// floor sensors, unmapped — see `cliff_flags`); bit 32 = `dock_sta`
 /// (clears off-dock). NOTE: bits 16-18 read `0b111` both docked AND lifted, so the
 /// Z10 `ir_dock*` decode below is **suspect on the W10** (not dock presence).
 ///
@@ -407,9 +407,13 @@ impl Triggers {
     pub fn right_bumper(&self) -> bool {
         self.bit(5)
     }
+    /// Left drive wheel dropped/floating (no ground). **[verified]** by pushing
+    /// the left wheel into the body — bit 6 clears.
     pub fn left_wheel_floating(&self) -> bool {
         self.bit(6)
     }
+    /// Right drive wheel dropped/floating. **[verified]** — bit 7 clears when the
+    /// right wheel is pushed in.
     pub fn right_wheel_floating(&self) -> bool {
         self.bit(7)
     }
@@ -417,8 +421,9 @@ impl Triggers {
     /// at bits 8-13 (baseline `0x3f` when lifted); a bit is set when its sensor
     /// sees no floor (a fall edge, or a lift). **[verified]** by covering each in
     /// turn: **bit 8 = front-left, bit 11 = front-right, bit 12 = rear-left, bit 13
-    /// = rear-right**. Bits 9 and 10 did not respond to the cliff positions and are
-    /// likely the left/right wheel sensors (per the owner) — not isolated yet.
+    /// = rear-right**. Bits 9 and 10 are two more floor sensors, positions not
+    /// isolated (they are NOT the wheels — the wheel drop sensors are `raw[0]` bits
+    /// 6/7, confirmed by pressing each wheel).
     pub fn cliff_flags(&self) -> u8 {
         self.raw[1]
     }
