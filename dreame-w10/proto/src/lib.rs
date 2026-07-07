@@ -362,7 +362,17 @@ impl Status100ms {
     }
 }
 
-/// `0x00` — bumpers, wheel-float, dock IR and every fault flag. 7-byte bitfield.
+/// `0x00` — bumpers, wheel-float, cliff/floor sensors, dock and fault flags.
+/// 7-byte bitfield, sent ~10 Hz (so bumper/cliff/lift are all polled together at
+/// 10 Hz; the immediate safety reaction is on the MCU itself).
+///
+/// **W10 live-verified this session:** bit 4 = left bumper, bit 5 = right bumper
+/// (pressed each); bit 6 = left / bit 7 = right wheel float (both set when the
+/// robot is lifted); **`raw[1]` (bits 8-15) = the cliff / floor sensors** (fire
+/// together when the robot is lifted off the floor — no return under the downward
+/// sensors; the individual bit->sensor map is not split yet); bit 32 = `dock_sta`
+/// (clears off-dock). NOTE: bits 16-18 read `0b111` both docked AND lifted, so the
+/// Z10 `ir_dock*` decode below is **suspect on the W10** (not dock presence).
 ///
 /// The MCU transmits each byte bit-reversed; equivalently, global bit `k` is
 /// `(raw[k/8] >> (k%8)) & 1` (LSB-first), which is what `bit()` returns.
@@ -402,6 +412,16 @@ impl Triggers {
     }
     pub fn right_wheel_floating(&self) -> bool {
         self.bit(7)
+    }
+    /// Cliff / floor-sensor bits (`raw[1]`, global bits 8-15). Nonzero when a
+    /// downward sensor sees no floor — **[verified]** all fire when the robot is
+    /// lifted; the per-sensor bit->position map is not split yet.
+    pub fn cliff_flags(&self) -> u8 {
+        self.raw[1]
+    }
+    /// True if any cliff / floor sensor reports no floor (a fall edge or a lift).
+    pub fn any_cliff(&self) -> bool {
+        self.raw[1] != 0
     }
     pub fn ir_dock_lf(&self) -> u8 {
         self.ir3(16)
