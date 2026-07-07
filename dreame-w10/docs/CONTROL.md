@@ -8,7 +8,8 @@ This is path 2 of three (see [`../README.md`](../README.md)):
 1. drive via Valetudo -> `ava` (safe, but `ava` mediates);
 2. **inject/filter in the tap (this doc)** — real control, `ava` still handles
    charging/LDS/docking;
-3. full `ava` replacement (later).
+3. full `ava` replacement — done, see [`MCUD.md`](MCUD.md) (`w10-mcud`: drive +
+   brushes/fan/pump + lidar, no `ava`).
 
 ## Why filter, not inject a second writer
 
