@@ -368,9 +368,9 @@ impl Status100ms {
 ///
 /// **W10 live-verified this session:** bit 4 = left bumper, bit 5 = right bumper
 /// (pressed each); bit 6 = left / bit 7 = right wheel float (both set when the
-/// robot is lifted); **`raw[1]` (bits 8-15) = the cliff / floor sensors** (fire
-/// together when the robot is lifted off the floor — no return under the downward
-/// sensors; the individual bit->sensor map is not split yet); bit 32 = `dock_sta`
+/// robot is lifted); **`raw[1]` = six cliff / floor sensors at bits 8-13** (fire
+/// when lifted; front L/R = bits 8/11, rear L/R = bits 12/13, bits 9/10 unmapped —
+/// see `cliff_flags`); bit 32 = `dock_sta`
 /// (clears off-dock). NOTE: bits 16-18 read `0b111` both docked AND lifted, so the
 /// Z10 `ir_dock*` decode below is **suspect on the W10** (not dock presence).
 ///
@@ -413,15 +413,30 @@ impl Triggers {
     pub fn right_wheel_floating(&self) -> bool {
         self.bit(7)
     }
-    /// Cliff / floor-sensor bits (`raw[1]`, global bits 8-15). Nonzero when a
-    /// downward sensor sees no floor — **[verified]** all fire when the robot is
-    /// lifted; the per-sensor bit->position map is not split yet.
+    /// Cliff / floor-sensor bits (`raw[1]`). The W10 has **six** downward sensors
+    /// at bits 8-13 (baseline `0x3f` when lifted); a bit is set when its sensor
+    /// sees no floor (a fall edge, or a lift). **[verified]** by covering each in
+    /// turn: **bit 8 = front-left, bit 11 = front-right, bit 12 = rear-left, bit 13
+    /// = rear-right**. Bits 9 and 10 are two more floor sensors whose positions
+    /// were not isolated.
     pub fn cliff_flags(&self) -> u8 {
         self.raw[1]
     }
     /// True if any cliff / floor sensor reports no floor (a fall edge or a lift).
     pub fn any_cliff(&self) -> bool {
         self.raw[1] != 0
+    }
+    pub fn cliff_front_left(&self) -> bool {
+        self.bit(8)
+    }
+    pub fn cliff_front_right(&self) -> bool {
+        self.bit(11)
+    }
+    pub fn cliff_rear_left(&self) -> bool {
+        self.bit(12)
+    }
+    pub fn cliff_rear_right(&self) -> bool {
+        self.bit(13)
     }
     pub fn ir_dock_lf(&self) -> u8 {
         self.ir3(16)
