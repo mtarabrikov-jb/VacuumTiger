@@ -7,10 +7,16 @@
 //!   7702 lds-rx   raw LDS/LIDAR scan bytes (/dev/ttyS3 reads)
 //!   7703 mcu-tx   commands ava sent to the MCU (MotorCtrl/SetCleaning/LED)
 //!   7704 lds-tx   bytes ava sent to the LDS
+//!   7705 control  drive-command input (see below) — the only non-read-only port
 //!
 //! Thread-per-client with blocking writes: a slow/stalled client only lags
 //! itself; when it resumes, the ring resyncs and reports the dropped bytes. The
-//! relay never writes to any device — it is a read-only mirror.
+//! byte channels never touch a device. The **control** port lets one client
+//! write the shm `Control` block, which the tap uses to override `ava`'s
+//! MotorCtrl (opt-in drive-through). Protocol: newline-delimited text —
+//! `"<linear_mm_s> <rot_rad_s>"` sets and keeps the drive alive (send at >=2 Hz to
+//! feed the tap watchdog); `"stop"` disables. Disconnecting releases control back
+//! to `ava`.
 
 use avatap_shm::{Shm, CH_LDS_RX, CH_LDS_TX, CH_MCU_RX, CH_MCU_TX};
 use std::ffi::c_void;
@@ -84,6 +90,46 @@ fn serve_client(shm: &'static Shm, ring_idx: usize, name: &'static str, mut stre
     eprintln!("avatap-relay: {} client disconnected: {}", name, peer);
 }
 
+const CONTROL_PORT: u16 = 7705;
+
+/// Handle one drive-command client: parse lines into the shm `Control` block.
+/// One controller at a time is assumed; a new connection simply overwrites. On
+/// disconnect (or any read error) control is released back to `ava`.
+fn serve_control(shm: &'static Shm, stream: TcpStream) {
+    use std::io::{BufRead, BufReader};
+    let peer = stream.peer_addr().map(|a| a.to_string()).unwrap_or_default();
+    eprintln!("avatap-relay: control client connected: {}", peer);
+    let reader = BufReader::new(stream);
+    for line in reader.lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => break,
+        };
+        let t = line.trim();
+        if t.is_empty() {
+            continue;
+        }
+        if t == "stop" || t == "disable" {
+            shm.control.set(false, 0.0, 0.0);
+            continue;
+        }
+        let mut it = t.split_whitespace();
+        let lin = it.next().and_then(|s| s.parse::<f32>().ok());
+        let rot = it.next().and_then(|s| s.parse::<f32>().ok());
+        match (lin, rot) {
+            (Some(l), Some(r)) if l.is_finite() && r.is_finite() => shm.control.set(true, l, r),
+            _ => eprintln!("avatap-relay: control: bad line {:?}", t),
+        }
+    }
+    shm.control.set(false, 0.0, 0.0); // client gone -> ava resumes
+    eprintln!(
+        "avatap-relay: control client disconnected: {} (control released; overrides={}, hazard_clamps={})",
+        peer,
+        shm.control.overrides.load(std::sync::atomic::Ordering::Relaxed),
+        shm.control.hazard_clamps.load(std::sync::atomic::Ordering::Relaxed),
+    );
+}
+
 fn main() {
     let bind_host = std::env::args().nth(1).unwrap_or_else(|| "0.0.0.0".to_string());
 
@@ -114,6 +160,27 @@ fn main() {
                 }
             }
         }));
+    }
+
+    // Control port: served inline (one drive-controller at a time — a second
+    // connection waits in the backlog until the first releases).
+    let ctrl_addr = format!("{}:{}", bind_host, CONTROL_PORT);
+    match TcpListener::bind(&ctrl_addr) {
+        Ok(listener) => {
+            eprintln!("avatap-relay: serving control on {}", ctrl_addr);
+            handles.push(thread::spawn(move || {
+                for stream in listener.incoming() {
+                    match stream {
+                        Ok(s) => {
+                            let _ = s.set_nodelay(true);
+                            serve_control(shm, s);
+                        }
+                        Err(e) => eprintln!("avatap-relay: control accept error: {}", e),
+                    }
+                }
+            }));
+        }
+        Err(e) => eprintln!("avatap-relay: cannot bind control {}: {}", ctrl_addr, e),
     }
 
     if handles.is_empty() {

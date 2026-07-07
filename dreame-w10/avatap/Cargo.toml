@@ -14,3 +14,5 @@ crate-type = ["cdylib"]
 # glibc 2.23 (the same reason the C camera tap was built against old glibc).
 libc = { version = "0.2", default-features = false }
 avatap-shm = { path = "../shm" }
+# no_std, no external deps — frame parse (Triggers hazard) + MotorCtrl re-encode.
+dreame-w10-proto = { path = "../proto" }

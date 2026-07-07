@@ -1,5 +1,10 @@
 //! `avatap.so` — an `LD_PRELOAD` shim injected into `ava` (the W10 navigation
-//! daemon) that mirrors its serial traffic to shared memory, read-only.
+//! daemon) that mirrors its serial traffic to shared memory. Read-only by
+//! default; it also has an **opt-in control override** that lets an out-of-`ava`
+//! client replace the `MotorCtrl` (0x00) frame `ava` sends to the MCU with a
+//! commanded velocity (via the `Control` block in shm). The override is gated by
+//! a watchdog (stale command -> `ava` resumes), a speed clamp and a live
+//! cliff/bumper hazard gate; with no active command the tap is a pure mirror.
 //!
 //! `ava` exclusively owns `/dev/ttyS4` (the motor/IMU/dock MCU) and `/dev/ttyS3`
 //! (the LDS/LIDAR). We can't open those ports a second time without stealing
@@ -17,8 +22,10 @@
 #![no_std]
 
 use avatap_shm::{Shm, CH_LDS_RX, CH_LDS_TX, CH_MCU_RX, CH_MCU_TX, NCHAN};
+use core::cell::UnsafeCell;
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU32, Ordering};
+use dreame_w10_proto::{encode_motor_ctrl, parse_body, FrameScanner, T_TRIGGERS};
 use libc::{c_char, c_int, c_long, off_t, size_t, ssize_t};
 
 #[panic_handler]
@@ -165,6 +172,98 @@ unsafe fn publish(ch: usize, ptr: *const u8, len: usize) {
 }
 
 // ---------------------------------------------------------------------------
+// Control override (opt-in). Replace ava's MotorCtrl (0x00) with a commanded
+// velocity, gated by a watchdog, a speed clamp and a live cliff/bumper hazard.
+// Default off: with no active command every write is byte-identical to ava's, so
+// the tap stays a pure read-only mirror until a client explicitly takes control.
+// ---------------------------------------------------------------------------
+
+/// Speed ceilings the tap enforces regardless of the commanded value.
+const MAX_LINEAR_MM_S: f32 = 150.0;
+const MAX_ROT_RAD_S: f32 = 1.5;
+/// After this many MotorCtrl writes with an unchanged control `seq`, revert to
+/// passthrough (~0.5 s at the 50 Hz MotorCtrl cadence — ava is the clock).
+const WATCHDOG_WRITES: u32 = 25;
+
+static LAST_SEQ: AtomicU32 = AtomicU32::new(0);
+static STALE_WRITES: AtomicU32 = AtomicU32::new(u32::MAX); // start stale
+/// Latest cliff / bumper / wheel-float hazard, tracked from the MCU read stream.
+static HAZARD: AtomicBool = AtomicBool::new(false);
+
+/// A `Sync` cell for the single-threaded MCU-read frame scanner.
+struct SyncCell<T>(UnsafeCell<T>);
+unsafe impl<T> Sync for SyncCell<T> {}
+static RX_SCAN: SyncCell<FrameScanner> = SyncCell(UnsafeCell::new(FrameScanner::new()));
+static RX_LOCK: AtomicBool = AtomicBool::new(false);
+
+/// Feed MCU->SoC bytes through a frame scanner and update [`HAZARD`] from the
+/// latest Triggers (0x00): bumper (bits 4/5) or wheel-float (6/7) in `payload[0]`,
+/// or any cliff / floor sensor (`payload[1]`).
+unsafe fn track_hazard(bytes: &[u8]) {
+    if RX_LOCK.swap(true, Ordering::Acquire) {
+        return; // contended (shouldn't happen: single reader thread) -> skip
+    }
+    let sc = &mut *RX_SCAN.0.get();
+    for &b in bytes {
+        if let Some(body) = sc.push(b) {
+            if let Ok((typ, payload)) = parse_body(body) {
+                if typ == T_TRIGGERS && payload.len() >= 2 {
+                    let hz = (payload[0] & 0xF0) != 0 || payload[1] != 0;
+                    HAZARD.store(hz, Ordering::Relaxed);
+                }
+            }
+        }
+    }
+    RX_LOCK.store(false, Ordering::Release);
+}
+
+#[inline]
+fn clampf(v: f32, lo: f32, hi: f32) -> f32 {
+    if v < lo {
+        lo
+    } else if v > hi {
+        hi
+    } else {
+        v
+    }
+}
+
+/// If control is enabled and fresh, build the override MotorCtrl frame into `out`
+/// and return its length; otherwise `None` (caller passes ava's frame through).
+unsafe fn control_frame(out: &mut [u8]) -> Option<usize> {
+    let shm = shm()?;
+    let (seq, enabled, linear, rot) = shm.control.snapshot();
+    // Watchdog on the control seq, clocked by ava's own MotorCtrl cadence.
+    let fresh = if seq != LAST_SEQ.load(Ordering::Relaxed) {
+        LAST_SEQ.store(seq, Ordering::Relaxed);
+        STALE_WRITES.store(0, Ordering::Relaxed);
+        true
+    } else {
+        STALE_WRITES.fetch_add(1, Ordering::Relaxed) + 1 <= WATCHDOG_WRITES
+    };
+    if !enabled || !fresh {
+        return None;
+    }
+    let mut lin = clampf(linear, -MAX_LINEAR_MM_S, MAX_LINEAR_MM_S);
+    let rotc = clampf(rot, -MAX_ROT_RAD_S, MAX_ROT_RAD_S);
+    // Hazard gate: never translate into a detected cliff/bump (rotation stays ok).
+    if HAZARD.load(Ordering::Relaxed) && lin != 0.0 {
+        lin = 0.0;
+        shm.control.hazard_clamps.fetch_add(1, Ordering::Relaxed);
+    }
+    let n = encode_motor_ctrl(1, lin, rotc, out)?;
+    shm.control.overrides.fetch_add(1, Ordering::Relaxed);
+    Some(n)
+}
+
+/// True if `buf` starts a MotorCtrl frame: `<`(0x3c) `len=09` `type=00`. Both
+/// `09`/`00` are escape-free, and only MotorCtrl carries a 9-byte payload.
+#[inline]
+unsafe fn is_motorctrl(buf: *const u8, count: usize) -> bool {
+    count >= 3 && *buf == b'<' && *buf.add(1) == 9 && *buf.add(2) == 0
+}
+
+// ---------------------------------------------------------------------------
 // Real-symbol accessors (cached fn pointers)
 // ---------------------------------------------------------------------------
 unsafe fn real_read() -> Option<ReadFn> {
@@ -256,7 +355,10 @@ pub unsafe extern "C" fn read(fd: c_int, buf: *mut c_void, count: size_t) -> ssi
     };
     if r > 0 && fd >= 0 && (fd as usize) < MAXFD {
         match CHAN[fd as usize].load(Ordering::Relaxed) {
-            K_MCU => publish(CH_MCU_RX, buf as *const u8, r as usize),
+            K_MCU => {
+                publish(CH_MCU_RX, buf as *const u8, r as usize);
+                track_hazard(core::slice::from_raw_parts(buf as *const u8, r as usize));
+            }
             K_LDS => publish(CH_LDS_RX, buf as *const u8, r as usize),
             _ => {}
         }
@@ -266,12 +368,30 @@ pub unsafe extern "C" fn read(fd: c_int, buf: *mut c_void, count: size_t) -> ssi
 
 #[no_mangle]
 pub unsafe extern "C" fn write(fd: c_int, buf: *const c_void, count: size_t) -> ssize_t {
-    // Capture what ava is about to send before the syscall (mirror intent).
     if fd >= 0 && (fd as usize) < MAXFD && count > 0 {
-        match CHAN[fd as usize].load(Ordering::Relaxed) {
+        let kind = CHAN[fd as usize].load(Ordering::Relaxed);
+        // Mirror ava's intended bytes (what it *wanted* to send).
+        match kind {
             K_MCU => publish(CH_MCU_TX, buf as *const u8, count),
             K_LDS => publish(CH_LDS_TX, buf as *const u8, count),
             _ => {}
+        }
+        // Control override: swap ava's MotorCtrl for the commanded velocity. Only
+        // when a client is actively driving; otherwise this branch is inert.
+        if kind == K_MCU && is_motorctrl(buf as *const u8, count) {
+            let mut frame = [0u8; 64];
+            if let Some(n) = control_frame(&mut frame) {
+                let p = frame.as_ptr() as *const c_void;
+                match real_write() {
+                    Some(f) => {
+                        f(fd, p, n);
+                    }
+                    None => {
+                        raw_write(fd, p, n);
+                    }
+                }
+                return count as ssize_t; // report ava's whole frame as written
+            }
         }
     }
     match real_write() {

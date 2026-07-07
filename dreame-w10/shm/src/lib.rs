@@ -10,13 +10,13 @@
 #![no_std]
 
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 pub const SHM_PATH: &str = "/tmp/avatap.shm";
 /// NUL-terminated form for C `open()`.
 pub const SHM_PATH_C: &[u8] = b"/tmp/avatap.shm\0";
 pub const MAGIC: u32 = 0x5041_5441; // "ATAP"
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2; // v2: added Control block
 
 pub const CH_MCU_RX: usize = 0; // /dev/ttyS4 read  (telemetry from MCU)
 pub const CH_MCU_TX: usize = 1; // /dev/ttyS4 write (commands to MCU)
@@ -104,12 +104,64 @@ impl Ring {
     }
 }
 
+/// Drive-command override block. An out-of-`ava` process (the relay's control
+/// client) asks the tap to replace the `MotorCtrl` (0x00) frame `ava` forwards to
+/// the MCU with its own velocities. Lock-free: the tap reads these on each
+/// MotorCtrl write; the client writes them.
+///
+/// Safety model (all enforced in the tap):
+/// - **Watchdog:** `seq` must keep advancing; the tap counts MotorCtrl writes
+///   since it last changed and reverts to passthrough if it goes stale (no clock
+///   needed — `ava`'s 50 Hz write cadence is the clock). Stop refreshing → `ava`
+///   resumes control.
+/// - **Enable gate:** `enabled == 0` → passthrough.
+/// - The tap additionally clamps by speed limit and by live hazard (cliff/bumper).
+#[repr(C)]
+pub struct Control {
+    /// 1 = override active, 0 = passthrough (`ava` drives).
+    pub enabled: AtomicU32,
+    /// Monotonic; the client bumps it every refresh (watchdog liveness).
+    pub seq: AtomicU32,
+    /// Commanded linear velocity, `f32` mm/s, as bits.
+    pub linear_bits: AtomicU32,
+    /// Commanded rotational velocity, `f32` rad/s, as bits.
+    pub rot_bits: AtomicU32,
+    /// Diagnostic: MotorCtrl frames the tap has overridden.
+    pub overrides: AtomicU64,
+    /// Diagnostic: overrides the hazard gate clamped to a stop.
+    pub hazard_clamps: AtomicU64,
+}
+
+impl Control {
+    /// Client side: publish a command and bump the watchdog sequence.
+    pub fn set(&self, enabled: bool, linear: f32, rot: f32) {
+        self.linear_bits.store(linear.to_bits(), Ordering::Relaxed);
+        self.rot_bits.store(rot.to_bits(), Ordering::Relaxed);
+        self.enabled.store(enabled as u32, Ordering::Relaxed);
+        // seq last, Release: a tap that sees the new seq also sees the values.
+        self.seq
+            .store(self.seq.load(Ordering::Relaxed).wrapping_add(1), Ordering::Release);
+    }
+    /// Tap side: `(seq, enabled, linear mm/s, rot rad/s)`.
+    #[inline]
+    pub fn snapshot(&self) -> (u32, bool, f32, f32) {
+        let seq = self.seq.load(Ordering::Acquire);
+        (
+            seq,
+            self.enabled.load(Ordering::Relaxed) != 0,
+            f32::from_bits(self.linear_bits.load(Ordering::Relaxed)),
+            f32::from_bits(self.rot_bits.load(Ordering::Relaxed)),
+        )
+    }
+}
+
 #[repr(C)]
 pub struct Shm {
     pub magic: u32,
     pub version: u32,
     pub started_ns: u64,
     pub ring: [Ring; NCHAN],
+    pub control: Control,
 }
 
 unsafe impl Sync for Shm {}
