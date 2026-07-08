@@ -89,9 +89,9 @@ dhruva-slam -c dhruva-robot.toml
 
 Validated end-to-end 2026-07-07: with SangamIO in direct mode and `lidar on`, dhruva-slam connects, streams UDP, and logs `Lidar scan received: ~270 points` at ~5 Hz (plus wheel odometry from `sensor_status`); no crashes.
 
-### Calibration (pending)
+### Calibration (done)
 
-The `frame_transforms.lidar` (`scale`/`offset`) and `lidar_mounting.angle_offset` values in `dreame_w10*.toml` are **uncalibrated starting guesses** (`scale=-1`, `offset=0`, `angle_offset=0.4204`/theta 24.09 from the robot's `/mnt/misc/lds_config.json`). To calibrate: place the robot with a flat wall at a known distance/direction inside the ~126 deg arc, capture with `lidar_rx.py`, and adjust `scale`/`offset`/`angle_offset` (TOML only, no rebuild) until the wall lands at the correct ROS angle (0 = forward, CCW positive). `offset_x=-0.087` (LDS behind center) is already from `lds_config.json`.
+The `frame_transforms.lidar` was calibrated on the robot: `scale=-1` (the LDS spins CW, so -1 maps it to ROS CCW) and `offset=0.506`. Procedure: with a flat wall ~0.5 m off the robot's **left** side, `tools/lidar_rx.py` showed the wall's closest cluster at ~61 deg; adding +29 deg (0.506 rad) to `offset` moved it to ~91 deg = 90 deg (ROS left), i.e. forward=0, left=90, back=180, right=270. `angle_offset=0.4204` (theta 24.09 from `/mnt/misc/lds_config.json`) and `offset_x=-0.087` (LDS behind center) are kept. Re-calibrate the same way (TOML only, no rebuild) if the mount changes. Coverage is still the fixed ~126 deg arc.
 
 ## Protocol references
 

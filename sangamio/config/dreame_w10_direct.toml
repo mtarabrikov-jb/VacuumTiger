@@ -18,8 +18,8 @@ heartbeat_interval_ms = 20   # unused (fixed 50 Hz MotorCtrl)
 # UNCALIBRATED starting guesses: point the robot's known forward at a flat wall,
 # capture a scan, and adjust until the ~126 deg arc lands on the wall.
 [device.hardware.frame_transforms.lidar]
-scale = -1.0    # guess: LDS spins CW; -1 maps to ROS CCW. CALIBRATE.
-offset = 0.0    # rotate raw-zero to robot forward. CALIBRATE.
+scale = -1.0      # LDS spins CW; -1 maps to ROS CCW.
+offset = 0.506    # calibrated: wall-on-left landed at 61 deg, +29 deg -> 90 deg (left)
 
 [device.hardware.lidar_mounting]
 offset_x = -0.087      # LDS behind robot center (m), from robot /mnt/misc/lds_config.json

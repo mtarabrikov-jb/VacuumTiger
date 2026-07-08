@@ -23,8 +23,8 @@ heartbeat_interval_ms = 20
 # direct mode). Shared defaults are CRL-200S values (wrong for the W10). These are
 # UNCALIBRATED starting guesses -- calibrate on-robot (see dreame_w10_direct.toml).
 [device.hardware.frame_transforms.lidar]
-scale = -1.0    # CALIBRATE
-offset = 0.0    # CALIBRATE
+scale = -1.0      # LDS spins CW; -1 maps to ROS CCW.
+offset = 0.506    # calibrated in direct mode (wall-on-left -> 90 deg). Same physical LDS.
 
 [device.hardware.lidar_mounting]
 offset_x = -0.087      # from robot /mnt/misc/lds_config.json
