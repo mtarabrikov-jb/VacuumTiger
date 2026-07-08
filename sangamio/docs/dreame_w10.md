@@ -89,9 +89,28 @@ dhruva-slam -c dhruva-robot.toml
 
 Validated end-to-end 2026-07-07: with SangamIO in direct mode and `lidar on`, dhruva-slam connects, streams UDP, and logs `Lidar scan received: ~270 points` at ~5 Hz (plus wheel odometry from `sensor_status`); no crashes.
 
-### Calibration (done)
+### Frame calibration
 
-The `frame_transforms.lidar` was calibrated on the robot: `scale=-1` (the LDS spins CW, so -1 maps it to ROS CCW) and `offset=0.506`. Procedure: with a flat wall ~0.5 m off the robot's **left** side, `tools/lidar_rx.py` showed the wall's closest cluster at ~61 deg; adding +29 deg (0.506 rad) to `offset` moved it to ~91 deg = 90 deg (ROS left), i.e. forward=0, left=90, back=180, right=270. `angle_offset=0.4204` (theta 24.09 from `/mnt/misc/lds_config.json`) and `offset_x=-0.087` (LDS behind center) are kept. Re-calibrate the same way (TOML only, no rebuild) if the mount changes. Coverage is still the fixed ~126 deg arc.
+The driver publishes each point as `robot_angle = frame_transforms.lidar.apply(raw)` then `lidar_mounting.transform_to_robot_center(...)`, where `apply(x) = scale*x + offset`. `scale` fixes the rotation direction (the LDS spins CW, so `scale=-1` gives ROS CCW); `offset` rotates the raw-sensor zero to robot forward. Target ROS frame (REP-103): **forward=0, left=90, back=180, right=270 deg, CCW positive**. Calibration = find `scale` and `offset` so a known physical direction lands at its ROS angle. TOML-only, no rebuild (the config is read at sangamio start).
+
+Current calibrated values (this robot, `r2104`): `scale=-1`, `offset=0.506`, plus `angle_offset=0.4204` (theta 24.09 from `/mnt/misc/lds_config.json`) and `offset_x=-0.087` (LDS behind center). Redo this if the LDS is remounted.
+
+**Why it works with one wall:** the closest point of a flat wall is the perpendicular foot, so the *nearest* returns point straight at the wall. `tools/cal_lidar.py` reports the median angle of the closest ~15% of points = the wall's direction in the current published frame. Compare that to where the wall physically is, and rotate `offset` by the difference.
+
+**Procedure (with sangamio running in direct mode, `lidar on`):**
+
+1. Take the robot off the dock into open space. Put a flat wall/box ~0.5 m from **one** side and note which side (front/back/left/right = target 0/180/90/270 deg).
+2. Measure where the wall reads now:
+   ```
+   tools/cal_lidar.py <robot-ip> 6
+   ```
+   Note the reported "wall angle ... median M deg". (`tools/lidar_rx.py` shows the full 30-deg coverage histogram if you want to see the ~126-deg arc.)
+3. Set `frame_transforms.lidar.offset += (target - M)` **in radians** (deg * pi/180). Redeploy the config and restart sangamio, then re-run step 2. The wall should now sit at the target; iterate once or twice to tighten it.
+4. **Handedness check:** if step 3 moves the wall the *wrong* way (further from target), flip `scale` (e.g. `-1` <-> `1`) and redo. A correct `scale` makes the wall move toward the target as you increase `offset`.
+
+**Worked example (this robot):** wall on the **left** (target 90). `cal_lidar.py` reported median **61 deg**; `90 - 61 = +29 deg = +0.506 rad`, so `offset 0.0 -> 0.506`. Re-measured: **~91 deg**. Done.
+
+**Caveats:** coverage is the fixed ~126 deg arc, so the wall must fall inside it (rotate the robot if the chosen side isn't seen). The position offset (`offset_x/y`) perturbs the angle slightly for near points, so expect ~1-2 deg residual; a single wall pins rotation + handedness but not a full mounting solve.
 
 ## Protocol references
 
