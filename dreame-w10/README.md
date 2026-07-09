@@ -16,15 +16,16 @@ robot safe. Everything here is Rust, matching the rest of VacuumTiger.
 - **MCU** — `/dev/ttyS4 @ 115200`. Framed binary protocol (`<len type payload
   crc16>`); gives wheel velocities, IMU, wheel/dock IR, currents, battery;
   accepts `MotorCtrl` (linear+rotational velocity), `SetCleaning`
-  (fan/brushes/pump) and `SetButtonLED` (also the heartbeat). Decoded in
+  (fan/brushes/mop-pads) and `SetButtonLED` (also the heartbeat). Decoded in
   [`proto/`](proto/src/lib.rs); full findings in
   [`docs/MCU_PROTOCOL.md`](docs/MCU_PROTOCOL.md).
 - **LDS/LIDAR** — `/dev/ttyS3 @ 230400` (config node `AvaNodeLDS`). Scan format
   reverse-engineered (40-byte packets, 8 range samples each); decoded in
   [`proto/src/lds.rs`](proto/src/lds.rs), findings in
   [`docs/LDS_PROTOCOL.md`](docs/LDS_PROTOCOL.md).
-- **Actuators** — fan/brush/pump run off the MCU `SetCleaning` command and/or the
-  SoC `pwmchip0` (16 channels); exact mapping TBD.
+- **Actuators** — fan/brush/mop-pads run off the MCU `SetCleaning` command and/or the
+  SoC `pwmchip0` (16 channels); exact mapping TBD (the robot has no water pump — the
+  dock does; see [`docs/MCU_PROTOCOL.md`](docs/MCU_PROTOCOL.md)).
 - `ava` holds ttyS4 (fd 25) and ttyS3 (fd 30); a second opener would steal bytes,
   hence the tap rather than a direct open.
 

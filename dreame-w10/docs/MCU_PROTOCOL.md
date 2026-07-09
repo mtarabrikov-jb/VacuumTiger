@@ -21,7 +21,7 @@ some fields/scales are wrong · **[unknown]** seen on the wire, not decoded.
   in `/ava/conf/r2104.conf`. **Scan format decoded** — see [`LDS_PROTOCOL.md`](LDS_PROTOCOL.md).
   **The turret only spins during active navigation** — `lds-rx` is silent while the
   robot is idle/docked; enabling Valetudo manual control is enough to start it.
-- **Actuators**: fan/brush/pump via MCU `SetCleaning` (0x01) and/or SoC `pwmchip0`
+- **Actuators**: fan/brush/mop-pads via MCU `SetCleaning` (0x01) and/or SoC `pwmchip0`
   (16 channels); exact mapping TBD.
 - `ava` opens both ports from process start; a second opener steals bytes, hence
   the read-only tap (`avatap.so`) rather than a direct open.
@@ -50,7 +50,7 @@ Observed types and rates (measured via the tap; ratios cross-checked, e.g.
 | 0x01 | Status20ms (pose/velocity) | 30 | 20 ms | [verified] |
 | 0x02 | Status10ms (IMU/odometry) | 18 | 10 ms | [verified] |
 | 0x03 | Status100ms (tilt/currents) | 11 | 100 ms | **[verified]** currents; tilt [partial] |
-| 0x05 | slow timer / RTC-like counter | 6 | ~500 ms | [partial] — monotonic, opaque |
+| 0x05 | slow status (SoC + counter) | 6 | ~500 ms | **[partial]** — `[0]` = battery SoC %, `[1:3]` = 16-bit LE frame counter, `[3]` = a slow value that rises as the battery discharges, `[4:6]` = constant (unidentified) |
 | 0x0f | Ping (SoC pongs 0x0f) | 8 | ~500 ms | **[verified]** — `ava` replies with a 4 B pong |
 | 0x12 | timestamped status | 7 | ~100 ms | [partial] — `u32` ts + opaque bytes (`1d 01` const tail) |
 | 0x23 | dock/station status | 6 | ~100 ms | **[partial]** — `byte[2]` = dock tank flags: **bit 0 = clean-water tank, bit 2 = waste-water tank missing** [both verified by A-B, all-present = 0]; bit 1 unknown/unused (this W10 has no auto-empty dust bag). Docked-all-present = `10 00 00 00 00 42` |
@@ -110,15 +110,15 @@ W10 payload is **11 bytes** (Z10 was 9). Resting frame:
 | 2..3   | roll  | ~+14 | ~-13 | [partial] shifts under motion |
 | 4..5   | **left_current**  | ~0 | **310..430** | **[verified]** |
 | 6..7   | **right_current** | ~0 | **297..370** | **[verified]** |
-| 8..9   | load/current | ~0 (±1) | vac 1..23; **mop 27..343** | [partial] pump/mop-load candidate; **not** the Z10 flag bitfield |
+| 8..9   | load/current | ~0 (±1) | vac 1..23; **mop 27..343** | [partial] mop-pad-load candidate (the robot has no water pump); **not** the Z10 flag bitfield |
 | 10     | **flags** | `0x00` (bin in) | `0x01` (bin out) | **[verified]** consumables/attachment bitfield — **bit 0 = dustbin missing** (bin in/out A-B test); other bits track mop/tank (`0x12` no-mop → `0x00` with mop) |
 
 Verification: an in-place rotation via Valetudo manual control (wheels only, no
-pump) makes `left_current@4` and `right_current@6` jump from ~0 to ~300-430 while
+brush or mop) makes `left_current@4` and `right_current@6` jump from ~0 to ~300-430 while
 every other field barely moves — the unambiguous "both wheels drawing current"
 signature. This corrects the earlier `[partial]`: the currents are the Z10
 offsets (4/6) after all. Byte 8 is a small signed load/current value (near 0 at
-rest, ~1-23 vacuuming, **~27-343 while mopping** — a pump/mop-load candidate), so
+rest, ~1-23 vacuuming, **~27-343 while mopping** — a mop-pad-load candidate; the robot has no water pump), so
 it is **not** the Z10 consumable-flag bitfield. The consumable/attachment flags
 are at **byte 10**: an A-B test (pull the bin, reinsert it, mop unchanged) flipped
 `byte[10]` bit 0 (`0x00` bin-in → `0x01` bin-out) with nothing else stable
@@ -154,11 +154,15 @@ charge errors) are per [`proto`](../proto/src/lib.rs), from the Z10 analogy
 
 ### 0x2b BatteryStatus [verified]
 
-Layout `<H H h H h H>` (12 B): voltage_mv@0, current_ma@2, temp@4 (/10 °C),
+Layout `<H h h H h H>` (12 B): voltage_mv@0, **current_ma@2 = signed `i16`**, temp@4 (/10 °C),
 charge_voltage_mv@6, **soc@8 = direct percent (0..100)**, then 2 bytes. Verified:
 on the dock **16.33 V / 25.0 °C / charge 19.86 V / 100 %**; off-dock **16.08 V,
 356 mA discharge, charge 0.22 V, 86 %** — SOC tracks a 4S Li-ion curve. The W10
 SOC is a plain percent, not centi-percent (the Z10 `/100` was wrong here).
+**`current_ma@2` is signed** (`i16`; + = discharge, − = charge): ~470 mA idle
+off-dock, rising to ~1100 mA with the suction fan on — the fan has no dedicated
+current field, so its ~600 mA draw shows up only in this total (see the
+`fan_overcurrent` fault, Triggers **bit 42**).
 
 ## Messages to the MCU (from `ava`)
 
@@ -169,12 +173,12 @@ Z10 reference, not yet observed. Encoders are in [`proto`](../proto/src/lib.rs):
 | type | name | payload | notes |
 |------|------|---------|-------|
 | 0x00 | MotorCtrl | `<B f f>` = flag, linear, rotational | **[verified]** flag=1; linear **mm/s**, rotational **rad/s** (neg = CW); ~50 Hz keepalive at 0 when idle |
-| 0x01 | SetCleaning | **6 bytes** | **[verified live — fully mapped]** by driving each actuator under `mcud` (path 3) and watching currents / fan sound: **`[0]`=side-brush, `[1]`=main-brush (roller), `[2]`=fan, `[3]`=water pump, `[4]`=mode** (`03` vacuum / `00` mop / `01` nav). byte 0→`sidebrush_current@28`, byte 1→`roller_current@26`, byte 2→fan (audible), byte 3→pump. Vacuuming `55 6e 96 00 03 00` = side 85 / main 110 / fan 150 / mode 3 |
+| 0x01 | SetCleaning | **6 bytes** | **[verified live — fully mapped]** by driving each actuator under `mcud` (path 3) and watching currents / fan sound: **`[0]`=side-brush, `[1]`=main-brush (roller), `[2]`=fan, `[3]`=rotating mop pads, `[4]`=mode** (`03` vacuum / `00` mop / `01` nav). byte 0→`sidebrush_current@28`, byte 1→`roller_current@26`, byte 2→fan (audible), byte 3→the two spinning mop pads (+~0.3 A; **the robot has no water pump** — the pads rotate in mop mode `00`, blocked in vacuum mode `03` while docked). Vacuuming `55 6e 96 00 03 00` = side 85 / main 110 / fan 150 / mode 3 |
 | 0x02 | SetButtonLED | `<B>` | **[verified live]** LED-state enum: `0x21` idle, `0x02` after Locate, `0x04` during mop-dock clean; also the MCU heartbeat |
 | 0x0f | Pong | 4 bytes | **[verified live]** `ava`'s reply to the MCU `0x0f` ping (echoes the ping payload) |
 | 0x14 | nav/lidar flag | `<B B>` | **[verified]** `[1]`=1 keeps the LDS turret spinning; **`04 00` (idle) halts it**. Sent continuously in nav |
-| 0x1d | Laser/ToF enable | `<B B>` | **[verified]** `05 01` re-pulse (~every 4 s in nav) — part of keeping the lidar on |
-| 0x26 | nav/lidar status | 8 bytes | **[verified]** `[0]`=`0x64` idle → `0x14` in nav (lidar on); `[7]`=`0x04` const |
+| 0x1d | camera-AI reset (`AIReset2ComProcess`) | `<B B>` | **[verified]** `[0]` selects the AI target (`05` = RGB, `04` = stereo, `01` = ToF); `[1]`=`00` = **reset**, `01` = the nav re-pulse (~every 4 s in nav). `1d 05 00` with the turret off + camera closed **un-wedges the RGB isp0** (see "Camera vs the LDS turret" below); nav's `05 01` does not. Formerly read as "Laser/ToF enable" |
+| 0x26 | dock control + nav heartbeat | 8 bytes | **[verified]** dual-purpose: `[0]`=`0x14`/`0x64` idle heartbeat (also part of the nav frame set that keeps the turret spinning); the **base-station** dock fan/pump are driven through this frame (see "0x26 — base-station (dock) control" below). `[7]`=`0x04` under `mcud`, `0x02` on ava's dock commands |
 | — | **lidar on** | — | **[verified under mcud]** stream `0x14 04 01` + `0x26 14 ..` continuously + `0x1d 05 01` re-pulse → turret spins (~220 pkt/s on ttyS3); revert to idle `0x14 04 00` → stops |
 | 0x04 | SetOdometer | `<B I I I b>` | Z10 ref, not observed |
 | 0x11 | SetLDSCalibration | `<f f f>` | Z10 ref, not observed |
@@ -183,6 +187,40 @@ Z10 reference, not yet observed. Encoders are in [`proto`](../proto/src/lib.rs):
 The MCU `0x0f` ping / `ava` `0x0f` pong exchange is **confirmed live** (the SoC
 answers every ping). A full-replacement driver must reproduce that pong and
 sustain the `0x02` LED/heartbeat, or the MCU flags a com fault.
+
+### 0x26 — base-station (dock) control [verified]
+
+The **water pump and mop-drying fan live in the base station, not on the robot**
+(the robot itself has no water pump). The robot relays their commands to the dock
+over the charging contacts as the 8-byte `0x26` payload. Reverse-engineered by
+disassembling `node_signal.so` (`AvaCleanDockProcess` / `CleanStationSetProcess` /
+`StationSetProcess` → `CastComMsg(0x26, buf, 8)`) and snooping ava's `ttyS4` while
+triggering mop wash/dry from Valetudo:
+
+| 8-byte payload | meaning |
+|----------------|---------|
+| `14 00 00 00 00 00 00 02` | idle / stop |
+| `0e 00 00 78 00 00 01 02` | **dry** — dock drying fan: byte3=`0x78` time, byte6=`0x01` on |
+| `0d 64 46 00 00 00 00 02` | **wash** — dock water pump: byte2=`0x46` water on, byte1=`0x64` pump rate |
+
+A full mop-wash is a cycle: the dock pump pulses + the robot's rotating mop pads
+run (SetCleaning mop mode `00`) → scrub → the dock drying fan → idle. **No `0x25`
+frame is used on this dock.** `0x26` is the dock **control** frame; the `0x23`
+frame above is the separate dock **status** frame (tank flags) — they do not
+conflict. Only trigger a wash when docked and attended — it pumps water into the
+base.
+
+### Camera vs the LDS turret [verified]
+
+The RGB camera (**OV8856**, `isp0`, `/dev/video2`) and `/scan` are **mutually
+exclusive**, and the cause is the **spinning LDS turret**, not motion: the
+turret's rotation disrupts the OV8856 MIPI and corrupts `isp0`
+(`[VIN_ERR] isp0 frame error, size 0`). RGB streams only with the turret off (the
+`0x14` / `0x26` / `0x1d` nav frames above spin it). The wedge persists after the
+turret stops; off-dock it clears (no `ava`/reboot) by sending the camera-AI-reset
+frame **`0x1d [05 00]`** (byte1=`00` = reset) with the turret off and the camera
+closed, then reopening `video2`. The IR/ToF sensor (`isp1`, a separate ISP + MIPI
+lane) is unaffected.
 
 ## Methodology (how to reproduce / extend)
 
@@ -225,9 +263,11 @@ removal tests — and the **LDS** scan format (see
    `roller_current@26` / `sidebrush_current@28` are now [verified].
 3. **0x23** `byte[2]` dock tank flags — clean-water = bit 0, waste-water = bit 2
    (both [verified]); bit 1 unknown/unused (this W10 has no auto-empty dust bag).
-   Other opaque types: **0x05** (slow timer/RTC), **0x12** (timestamped status),
-   **0x24** (flag byte), **0x2c** (slow counter), and TX **0x14 / 0x26**.
-4. **SetCleaning per-level scaling** — the byte roles are mapped (`[3]`=water/pump,
-   `[0..3]`=fan/brush, `[4]`=mode), but the low/med/high value per level is not,
+   Other opaque types: **0x12** (timestamped status), **0x24** (flag byte),
+   **0x2c** (slow counter), and TX **0x14**. (**0x05** is now partly decoded — SoC
+   + counter; **0x26** is the dock-control frame, above.)
+4. **SetCleaning per-level scaling** — the byte roles are mapped (`[0]`=side-brush,
+   `[1]`=main-brush, `[2]`=fan, `[3]`=rotating mop pads, `[4]`=mode), but the
+   low/med/high value per level is not,
    because `ava` re-sends this frame only at clean start, not on a mid-clean preset
    change.
