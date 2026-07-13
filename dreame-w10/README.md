@@ -26,6 +26,10 @@ robot safe. Everything here is Rust, matching the rest of VacuumTiger.
 - **Actuators** — fan/brush/mop-pads run off the MCU `SetCleaning` command and/or the
   SoC `pwmchip0` (16 channels); exact mapping TBD (the robot has no water pump — the
   dock does; see [`docs/MCU_PROTOCOL.md`](docs/MCU_PROTOCOL.md)).
+- **Base station (dock)** — a standalone GD32 MCU with its own firmware, LCD,
+  wash/dry pumps + heater + fan, sub-GHz radio and ymodem bootloader; the robot talks
+  to it over an `AA 55 …` RF frame. Reverse-engineered in
+  [`docs/DOCK_PROTOCOL.md`](docs/DOCK_PROTOCOL.md).
 - `ava` holds ttyS4 (fd 25) and ttyS3 (fd 30); a second opener would steal bytes,
   hence the tap rather than a direct open.
 

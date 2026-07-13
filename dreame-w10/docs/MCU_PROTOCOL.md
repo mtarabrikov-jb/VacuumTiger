@@ -191,24 +191,44 @@ sustain the `0x02` LED/heartbeat, or the MCU flags a com fault.
 ### 0x26 — base-station (dock) control [verified]
 
 The **water pump and mop-drying fan live in the base station, not on the robot**
-(the robot itself has no water pump). The robot relays their commands to the dock
-over the charging contacts as the 8-byte `0x26` payload. Reverse-engineered by
+(the robot itself has no water pump). This `0x26` frame is Layer 1 only (`ava` ->
+robot MCU); the robot MCU re-encodes it and forwards it to the **dock's own MCU**
+over a separate RF link (see [`DOCK_PROTOCOL.md`](DOCK_PROTOCOL.md)). The 8-byte
+`0x26` payload was reverse-engineered by
 disassembling `node_signal.so` (`AvaCleanDockProcess` / `CleanStationSetProcess` /
 `StationSetProcess` → `CastComMsg(0x26, buf, 8)`) and snooping ava's `ttyS4` while
 triggering mop wash/dry from Valetudo:
 
 | 8-byte payload | meaning |
 |----------------|---------|
-| `14 00 00 00 00 00 00 02` | idle / stop |
-| `0e 00 00 78 00 00 01 02` | **dry** — dock drying fan: byte3=`0x78` time, byte6=`0x01` on |
+| `15 00 00 00 00 00 00 02` | **docked idle / STOP** — ava streams this continuously; streaming it is what ABORTS a running wash/dry |
+| `0e 00 00 78 00 00 01 02` | **dry** 1/4 — dock fan/heater: byte3=`0x78` time, byte6=`0x01` on |
+| `65`/`66`/`67` `00 00 78 00 00 01 02` | **dry** 2/4, 3/4, 4/4 — byte0 walks the "dehydrating N/4" LCD screen |
 | `0d 64 46 00 00 00 00 02` | **wash** — dock water pump: byte2=`0x46` water on, byte1=`0x64` pump rate |
 
-A full mop-wash is a cycle: the dock pump pulses + the robot's rotating mop pads
-run (SetCleaning mop mode `00`) → scrub → the dock drying fan → idle. **No `0x25`
-frame is used on this dock.** `0x26` is the dock **control** frame; the `0x23`
-frame above is the separate dock **status** frame (tank flags) — they do not
-conflict. Only trigger a wash when docked and attended — it pumps water into the
-base.
+`byte0` is also the dock **LCD screen** code (`0x0d` mop-wash, `0x0e`/`0x65`-`0x67`
+dehydrating 1/4..4/4, `0x15` charging/100% — full byte0→screen table in
+[`DOCK_PROTOCOL.md`](DOCK_PROTOCOL.md)). A full mop-wash is a cycle: the dock pump
+pulses + the robot's rotating mop pads run (SetCleaning mop mode `00`) → scrub → the
+dry stages → idle.
+
+**Stopping a wash/dry [verified live].** The dock latches its own autonomous cycle
+once started; the only thing that aborts it is ava's exact idle frame
+`15 00 00 00 00 00 00 02`, **streamed continuously**. A few pulses, or a `0x14`-byte0
+idle, do NOT stop a dry — confirmed by snooping a Valetudo "stop mop drying" (ava
+streams `26 15 ..`) and reproduced from `ros2dreame` (`/set_station 0`). **No `0x25`
+frame is used on this dock.** `0x26` is the dock **control** frame; the `0x23` frame
+above is the separate dock **status** frame (tank flags) — they do not conflict. Only
+trigger a wash when docked and attended — it pumps water into the base.
+
+**The dock is a full second microcontroller.** Everything above is the robot side.
+The base station itself is a standalone GD32 MCU with its own firmware
+(`/UIMA.bin` / `/UIMB.bin`), an LCD, the wash/dry pumps + heater + fan, a sub-GHz
+radio and a ymodem bootloader. The robot MCU <-> dock MCU frame is
+`AA 55 | len | cmd | payload | crc16 | 0D 0A`; `cmd 0x80` is the dock control /
+display frame, `cmd 0x01` + `"BT"` enters the dock OTA bootloader. The dock LCD, its
+`Ux.bin` image format, and firmware flashing are decoded in
+[`DOCK_PROTOCOL.md`](DOCK_PROTOCOL.md).
 
 ### Camera vs the LDS turret [verified]
 
