@@ -53,7 +53,7 @@ Observed types and rates (measured via the tap; ratios cross-checked, e.g.
 | 0x05 | slow status (SoC + counter) | 6 | ~500 ms | **[partial]** — `[0]` = battery SoC %, `[1:3]` = 16-bit LE frame counter, `[3]` = a slow value that rises as the battery discharges, `[4:6]` = constant (unidentified) |
 | 0x0f | Ping (SoC pongs 0x0f) | 8 | ~500 ms | **[verified]** — `ava` replies with a 4 B pong |
 | 0x12 | timestamped status | 7 | ~100 ms | [partial] — `u32` ts + opaque bytes (`1d 01` const tail) |
-| 0x23 | dock/station status | 6 | ~100 ms | **[partial]** — `byte[2]` = dock tank flags: **bit 0 = clean-water tank, bit 2 = waste-water tank missing** [both verified by A-B, all-present = 0]; bit 1 unknown/unused (this W10 has no auto-empty dust bag). Docked-all-present = `10 00 00 00 00 42` |
+| 0x23 | dock/station status | 6 | ~100 ms | **[partial]** — `byte[0]` = **base-station buttons + docked flag**: bit0 = **Home**, bit2 = **Start/Stop** (both **[verified]** live by pressing each: `10`→`11`/`14`), bit4 (`0x10`) = docked. `byte[2]` = dock tank flags: **bit 0 = clean-water tank, bit 2 = waste-water tank missing** [both verified by A-B, all-present = 0]; bit 1 unknown/unused (this W10 has no auto-empty dust bag). Docked-all-present = `10 00 00 00 00 42` |
 | 0x24 | flag byte | 1 | ~500 ms | [partial] — `00` at idle |
 | 0x2b | BatteryStatus | 12 | ~1 s | [verified] |
 | 0x2c | slow cumulative counter | 10 | ~0.5 s | [partial] — `[1:3]` +2 over 12 s (uptime/stat?) |
